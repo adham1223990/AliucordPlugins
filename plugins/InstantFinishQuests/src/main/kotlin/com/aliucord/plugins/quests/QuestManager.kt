@@ -88,51 +88,7 @@ object QuestManager {
                     quest.userStatus = QuestsApi.enroll(quest)
                 }
 
-                if (taskKey.contains("STREAM")) {
-                    val altToken = settings.getString("alt_token", "")
-                    val voiceId = settings.getString("voice_id", "")
-                    val serverId = settings.getString("server_id", "")
-
-                    if (altToken.isBlank() || voiceId.isBlank() || serverId.isBlank()) {
-                        Utils.mainThread.post {
-                            onUpdate(false, "Configure voice_id, server_id, and alt_token")
-                        }
-                        return@execute
-                    }
-
-                    runCatching { QuestsApi.enroll(quest, altToken) }
-
-                    Utils.mainThread.post {
-                        onUpdate(true, "Alt ready! Start streaming your screen now")
-                        Utils.showToast("Please join Voice and start screen sharing")
-                    }
-
-                    val target = task.target.toDouble()
-                    var isCompleted = false
-
-                    while (!isCompleted) {
-                        Thread.sleep(STREAM_POLL_DELAY_MS)
-
-                        val refreshedQuests = QuestsApi.getQuests()
-                        val currentQuest = refreshedQuests.quests.firstOrNull { it.id == quest.id }
-                        val currentProgress = currentQuest?.userStatus?.progress?.get(taskKey)?.value?.toDouble() ?: 0.0
-
-                        if (currentQuest?.userStatus?.completedAt != null || currentProgress >= target) {
-                            quest.userStatus = currentQuest?.userStatus
-                            isCompleted = true
-                            Utils.mainThread.post {
-                                onUpdate(true, "Completed!")
-                                Utils.showToast("Quest completed successfully!")
-                            }
-                            return@execute
-                        } else {
-                            Utils.mainThread.post {
-                                onUpdate(true, "Streaming... (${currentProgress.toInt()}/${target.toInt()})")
-                            }
-                        }
-                    }
-
-                } else if (taskKey.contains("VIDEO")) {
+                if (taskKey.contains("VIDEO")) {
                     val target = task.target.toDouble()
                     var currentProgress = quest.userStatus?.progress?.get(taskKey)?.value?.toDouble() ?: 0.0
 
@@ -160,7 +116,49 @@ object QuestManager {
                     }
 
                 } else {
-                    Utils.mainThread.post { onUpdate(true, "Enrolled successfully") }
+                    // يشمل مهام STREAM و PLAY و PLAY_ACTIVITY وأي مهمة تعتمد على وجود بث أو لعبة
+                    val altToken = settings.getString("alt_token", "")
+                    val voiceId = settings.getString("voice_id", "")
+                    val serverId = settings.getString("server_id", "")
+
+                    if (altToken.isBlank() || voiceId.isBlank() || serverId.isBlank()) {
+                        Utils.mainThread.post {
+                            onUpdate(false, "Requires Alt Token, Server ID & Voice ID in Settings")
+                        }
+                        return@execute
+                    }
+
+                    runCatching { QuestsApi.enroll(quest, altToken) }
+
+                    Utils.mainThread.post {
+                        onUpdate(true, "Alt ready! Join Voice & start streaming/playing")
+                        Utils.showToast("Alt registered. Start streaming now!")
+                    }
+
+                    val target = task.target.toDouble()
+                    var isCompleted = false
+
+                    while (!isCompleted) {
+                        Thread.sleep(STREAM_POLL_DELAY_MS)
+
+                        val refreshedQuests = QuestsApi.getQuests()
+                        val currentQuest = refreshedQuests.quests.firstOrNull { it.id == quest.id }
+                        val currentProgress = currentQuest?.userStatus?.progress?.get(taskKey)?.value?.toDouble() ?: 0.0
+
+                        if (currentQuest?.userStatus?.completedAt != null || currentProgress >= target) {
+                            quest.userStatus = currentQuest?.userStatus
+                            isCompleted = true
+                            Utils.mainThread.post {
+                                onUpdate(true, "Completed!")
+                                Utils.showToast("Quest completed successfully!")
+                            }
+                            return@execute
+                        } else {
+                            Utils.mainThread.post {
+                                onUpdate(true, "Tracking progress... (${currentProgress.toInt()}/${target.toInt()})")
+                            }
+                        }
+                    }
                 }
 
             } catch (e: Exception) {
