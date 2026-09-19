@@ -20,9 +20,12 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
-        setActionBarTitle("Loading Quests...")
+        loadQuestsList(view.context)
+    }
 
-        val context = view.context
+    private fun loadQuestsList(context: Context) {
+        setActionBarTitle("Loading Quests...")
+        linearLayout.removeAllViews()
 
         Utils.threadPool.execute {
             try {
@@ -31,15 +34,26 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
 
                 val activeQuests = questsResponse.quests.filter {
                     val expires = runCatching { TimeUtils.parseUTCDate(it.config.expiresAt) }.getOrDefault(0L)
-                    expires > now && it.userStatus?.completedAt == null && it.userStatus?.claimedAt == null
+                    expires > now && it.userStatus?.claimedAt == null
                 }
 
                 Utils.mainThread.post {
                     setActionBarTitle("Instant Finish Quests")
 
+                    // زر Refresh علوي لتحديث الكويستات يدوياً في أي لحظة
+                    val refreshBtn = TextView(context).apply {
+                        text = "↻ Refresh Quests"
+                        setTextColor(Color.parseColor("#5865F2"))
+                        textSize = 14f
+                        gravity = Gravity.CENTER
+                        setPadding(0, DimenUtils.dpToPx(8), 0, DimenUtils.dpToPx(8))
+                        setOnClickListener { loadQuestsList(context) }
+                    }
+                    linearLayout.addView(refreshBtn)
+
                     if (activeQuests.isEmpty()) {
                         val noQuestsView = TextView(context).apply {
-                            text = "No active quests available to finish."
+                            text = "No active quests available."
                             setTextColor(Color.WHITE)
                             textSize = 16f
                             gravity = Gravity.CENTER
@@ -56,10 +70,11 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
                 Utils.mainThread.post {
                     setActionBarTitle("Instant Finish Quests")
                     val errorView = TextView(context).apply {
-                        text = "Failed to load quests. Please try again."
+                        text = "Failed to load quests. Click to retry."
                         setTextColor(Color.parseColor("#ED4245"))
                         gravity = Gravity.CENTER
                         setPadding(16, 64, 16, 16)
+                        setOnClickListener { loadQuestsList(context) }
                     }
                     linearLayout.addView(errorView)
                 }
@@ -80,9 +95,9 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
             ).apply {
                 setMargins(
                     DimenUtils.dpToPx(12),
+                    DimenUtils.dpToPx(8),
                     DimenUtils.dpToPx(12),
-                    DimenUtils.dpToPx(12),
-                    DimenUtils.dpToPx(4)
+                    DimenUtils.dpToPx(8)
                 )
             }
             setPadding(
@@ -105,16 +120,19 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
         val target = task?.target ?: 1
         val progressValue = quest.userStatus?.progress?.values?.firstOrNull()?.value ?: 0
 
+        val isCompleted = quest.userStatus?.completedAt != null
+        val isEnrolled = quest.userStatus?.enrolledAt != null
+
         val statusStr = when {
-            quest.userStatus?.completedAt != null -> "Completed"
-            quest.userStatus?.enrolledAt != null -> "In Progress"
-            else -> "Available"
+            isCompleted -> "Completed"
+            isEnrolled -> "In Progress"
+            else -> "Not Enrolled"
         }
 
         val statusColor = when {
-            quest.userStatus?.completedAt != null -> "#57F287"
-            quest.userStatus?.enrolledAt != null -> "#5865F2"
-            else -> "#B9BBBE"
+            isCompleted -> "#57F287"
+            isEnrolled -> "#5865F2"
+            else -> "#FAA61A"
         }
 
         val statusText = TextView(context).apply {
@@ -136,9 +154,9 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
         val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                DimenUtils.dpToPx(12)
+                DimenUtils.dpToPx(10)
             ).apply {
-                setMargins(0, 0, 0, DimenUtils.dpToPx(16))
+                setMargins(0, 0, 0, DimenUtils.dpToPx(14))
             }
             max = target
             progress = progressValue
@@ -147,11 +165,12 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
         card.addView(progressBar)
 
         val finishBtn = TextView(context).apply {
-            text = "Instantly finish this quest"
+            text = if (isCompleted) "Quest Completed" else "Instantly finish this quest"
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
+            isEnabled = !isCompleted
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#5865F2"))
+                setColor(Color.parseColor(if (isCompleted) "#4F545C" else "#5865F2"))
                 cornerRadius = DimenUtils.dpToPx(4).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
@@ -162,29 +181,35 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
         card.addView(finishBtn)
         linearLayout.addView(card)
 
-        finishBtn.setOnClickListener {
-            finishBtn.isEnabled = false
-            finishBtn.alpha = 0.6f
-            finishBtn.text = "Starting..."
+        if (!isCompleted) {
+            finishBtn.setOnClickListener {
+                finishBtn.isEnabled = false
+                finishBtn.alpha = 0.6f
+                finishBtn.text = "Starting..."
 
-            QuestManager.finishSingleQuest(quest, settings) { success, message ->
-                finishBtn.text = message
-                if (success && message == "Completed!") {
-                    finishBtn.background = GradientDrawable().apply {
-                        setColor(Color.parseColor("#4F545C"))
-                        cornerRadius = DimenUtils.dpToPx(4).toFloat()
+                QuestManager.finishSingleQuest(quest, settings) { success, message ->
+                    finishBtn.text = message
+                    if (success && message == "Completed!") {
+                        finishBtn.background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#4F545C"))
+                            cornerRadius = DimenUtils.dpToPx(4).toFloat()
+                        }
+                        statusText.text = "Status: Completed"
+                        statusText.setTextColor(Color.parseColor("#57F287"))
+                        progressBar.progress = target
+                        progressText.text = "Progress: $target / $target"
+                    } else if (success && message.contains("Tracking")) {
+                        // تحديث النسبة الحية أثناء البث
+                        statusText.text = "Status: In Progress"
+                        statusText.setTextColor(Color.parseColor("#5865F2"))
+                    } else if (!success) {
+                        finishBtn.background = GradientDrawable().apply {
+                            setColor(Color.parseColor("#ED4245"))
+                            cornerRadius = DimenUtils.dpToPx(4).toFloat()
+                        }
+                        finishBtn.isEnabled = true
+                        finishBtn.alpha = 1f
                     }
-                    statusText.text = "Status: Completed"
-                    statusText.setTextColor(Color.parseColor("#57F287"))
-                    progressBar.progress = target
-                    progressText.text = "Progress: $target / $target"
-                } else if (!success) {
-                    finishBtn.background = GradientDrawable().apply {
-                        setColor(Color.parseColor("#ED4245"))
-                        cornerRadius = DimenUtils.dpToPx(4).toFloat()
-                    }
-                    finishBtn.isEnabled = true
-                    finishBtn.alpha = 1f
                 }
             }
         }
