@@ -4,6 +4,7 @@ import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
 import com.discord.utilities.time.TimeUtils
+import java.util.Random
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -12,6 +13,7 @@ import kotlin.math.min
 object QuestManager {
     private val logger = Logger("InstantFinishQuests")
     private var scheduler: ScheduledExecutorService? = null
+    private val rng = Random()
 
     private const val MIN_PROGRESS_STEP = 6.0
     private const val MAX_PROGRESS_STEP = 7.0
@@ -54,7 +56,8 @@ object QuestManager {
 
                 for (quest in validQuests) {
                     finishSingleQuest(quest, settings) { _, _ -> }
-                    Thread.sleep((8000L..12000L).random())
+                    val delay = 8000L + rng.nextInt(4001)
+                    Thread.sleep(delay)
                 }
             } catch (e: Exception) {
                 logger.error("processAllAvailableQuests failed", e)
@@ -134,7 +137,8 @@ object QuestManager {
                     var currentProgress = quest.userStatus?.progress?.get(taskKey)?.value?.toDouble() ?: 0.0
 
                     while (currentProgress < target) {
-                        currentProgress = min(target, currentProgress + (MIN_PROGRESS_STEP..MAX_PROGRESS_STEP).random())
+                        val randomStep = MIN_PROGRESS_STEP + (rng.nextDouble() * (MAX_PROGRESS_STEP - MIN_PROGRESS_STEP))
+                        currentProgress = min(target, currentProgress + randomStep)
                         val updated = QuestsApi.reportVideoProgress(quest.id, currentProgress)
                         quest.userStatus = updated
 
