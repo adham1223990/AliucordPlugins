@@ -164,27 +164,27 @@ class QuestListPage(private val settings: SettingsAPI) : SettingsPage() {
 
         finishBtn.setOnClickListener {
             finishBtn.isEnabled = false
-            finishBtn.alpha = 0.5f
-            finishBtn.text = "Finishing..."
+            finishBtn.alpha = 0.6f
+            finishBtn.text = "Starting..."
 
-            Utils.threadPool.execute {
-                val result = QuestManager.finishSingleQuest(quest, settings)
-                Utils.mainThread.post {
-                    if (result.first) {
-                        finishBtn.text = result.second
-                        finishBtn.background = GradientDrawable().apply {
-                            setColor(Color.parseColor("#4F545C"))
-                            cornerRadius = DimenUtils.dpToPx(4).toFloat()
-                        }
-                    } else {
-                        finishBtn.text = result.second
-                        finishBtn.background = GradientDrawable().apply {
-                            setColor(Color.parseColor("#ED4245"))
-                            cornerRadius = DimenUtils.dpToPx(4).toFloat()
-                        }
-                        finishBtn.isEnabled = true
-                        finishBtn.alpha = 1f
+            QuestManager.finishSingleQuest(quest, settings) { success, message ->
+                finishBtn.text = message
+                if (success && message == "Completed!") {
+                    finishBtn.background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#4F545C"))
+                        cornerRadius = DimenUtils.dpToPx(4).toFloat()
                     }
+                    statusText.text = "Status: Completed"
+                    statusText.setTextColor(Color.parseColor("#57F287"))
+                    progressBar.progress = target
+                    progressText.text = "Progress: $target / $target"
+                } else if (!success) {
+                    finishBtn.background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#ED4245"))
+                        cornerRadius = DimenUtils.dpToPx(4).toFloat()
+                    }
+                    finishBtn.isEnabled = true
+                    finishBtn.alpha = 1f
                 }
             }
         }
