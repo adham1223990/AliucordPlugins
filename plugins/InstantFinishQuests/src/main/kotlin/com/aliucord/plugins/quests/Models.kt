@@ -119,6 +119,10 @@ data class EnrollQuestRequest(
 
 data class VideoProgressRequest(val timestamp: Double)
 
+data class HeartbeatRequest(
+    @SerializedName("stream_key") val streamKey: String
+)
+
 data class ClaimRewardRequest(
     val platform: Int,
     val location: Int = 12,
@@ -135,3 +139,6 @@ class QuestApiException(
     val captchaRequired: Boolean
         get() = captchaChallenge != null
 }
+
+fun questAssetUrl(asset: String): String =
+    if (asset.startsWith("http")) asset else "https://cdn.discordapp.com/${asset.removePrefix("/")}[span_1](start_span)"[span_1](end_span)
