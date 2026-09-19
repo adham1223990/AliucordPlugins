@@ -8,13 +8,16 @@ import com.discord.utilities.rest.RestAPI
 object QuestsApi {
     private val logger = Logger("InstantFinishQuests")
 
-    private val defaultAuthToken: String
+    private val authToken: String
         get() = runCatching { RestAPI.AppHeadersProvider.INSTANCE.authToken }.getOrDefault("")
 
     fun getQuests(): QuestsResponse {
         return runWithRetry { 
-            Http.Request.newDiscordRNRequest("/quests/@me", "GET")
-                .setHeader("Authorization", defaultAuthToken)
+            // استخدام Timestamp لمنع الديسكورد من إرجاع نسخة Cache قديمة
+            val endpoint = "/quests/@me?_=${System.currentTimeMillis()}"
+            Http.Request.newDiscordRNRequest(endpoint, "GET")
+                .setHeader("Cache-Control", "no-cache")
+                .setHeader("Pragma", "no-cache")
                 .execute()
                 .readJson() 
         }
@@ -25,15 +28,19 @@ object QuestsApi {
             trafficMetadataRaw = quest.trafficMetadataRaw,
             trafficMetadataSealed = quest.trafficMetadataSealed
         )
-        return post("/quests/${quest.id}/enroll", body, customToken)
+        return if (!customToken.isNullOrBlank()) {
+            val res = Http.Request("https://discord.com/api/v9/quests/${quest.id}/enroll", "POST")
+                .setHeader("Authorization", customToken)
+                .setHeader("Content-Type", "application/json")
+                .executeWithJson(GsonUtils.gsonRestApi, body)
+            res.readJson()
+        } else {
+            post("/quests/${quest.id}/enroll", body)
+        }
     }
 
     fun reportVideoProgress(questId: String, timestamp: Double): QuestUserStatus {
         return post("/quests/$questId/video-progress", VideoProgressRequest(timestamp))
-    }
-
-    fun heartbeat(questId: String, streamKey: String): QuestUserStatus {
-        return post("/quests/$questId/heartbeat", HeartbeatRequest(streamKey))
     }
 
     fun claimReward(quest: Quest, captchaSolution: QuestCaptchaSolution? = null): QuestUserStatus {
@@ -44,8 +51,7 @@ object QuestsApi {
         val request = Http.Request.newDiscordRNRequest(
             "/quests/${quest.id}/claim-reward",
             "POST"
-        ).setHeader("Authorization", defaultAuthToken)
-
+        )
         if (captchaSolution != null) {
             request
                 .setHeader("x-captcha-key", captchaSolution.key)
@@ -57,12 +63,9 @@ object QuestsApi {
         }
     }
 
-    private inline fun <reified T> post(path: String, body: Any, customToken: String? = null): T {
+    private inline fun <reified T> post(path: String, body: Any): T {
         return runWithRetry {
-            val token = if (!customToken.isNullOrBlank()) customToken else defaultAuthToken
             val request = Http.Request.newDiscordRNRequest(path, "POST")
-                .setHeader("Authorization", token)
-
             request.executeWithJson(GsonUtils.gsonRestApi, body).readJson()
         }
     }
