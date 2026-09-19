@@ -141,4 +141,4 @@ class QuestApiException(
 }
 
 fun questAssetUrl(asset: String): String =
-    if (asset.startsWith("http")) asset else "https://cdn.discordapp.com/${asset.removePrefix("/")}[span_1](start_span)"[span_1](end_span)
+    if (asset.startsWith("http")) asset else "https://cdn.discordapp.com/${asset.removePrefix("/")}"
