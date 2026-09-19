@@ -3,12 +3,21 @@ package com.aliucord.plugins.quests
 import com.aliucord.Http
 import com.aliucord.Logger
 import com.aliucord.utils.GsonUtils
+import com.discord.utilities.rest.RestAPI
 
 object QuestsApi {
     private val logger = Logger("InstantFinishQuests")
 
+    private val defaultAuthToken: String
+        get() = runCatching { RestAPI.AppHeadersProvider.INSTANCE.authToken }.getOrDefault("")
+
     fun getQuests(): QuestsResponse {
-        return runWithRetry { Http.Request.newDiscordRNRequest("/quests/@me", "GET").execute().readJson() }
+        return runWithRetry { 
+            Http.Request.newDiscordRNRequest("/quests/@me", "GET")
+                .setHeader("Authorization", defaultAuthToken)
+                .execute()
+                .readJson() 
+        }
     }
 
     fun enroll(quest: Quest, customToken: String? = null): QuestUserStatus {
@@ -23,8 +32,6 @@ object QuestsApi {
         return post("/quests/$questId/video-progress", VideoProgressRequest(timestamp))
     }
 
-    // ✅ نفس آلية PLAY_ON_DESKTOP / PLAY_ACTIVITY الموجودة في بوت الديسكورد —
-    // نداء REST واحد بدل الحاجة لمتصفح أو نشاط حقيقي.
     fun heartbeat(questId: String, streamKey: String): QuestUserStatus {
         return post("/quests/$questId/heartbeat", HeartbeatRequest(streamKey))
     }
@@ -37,7 +44,8 @@ object QuestsApi {
         val request = Http.Request.newDiscordRNRequest(
             "/quests/${quest.id}/claim-reward",
             "POST"
-        )
+        ).setHeader("Authorization", defaultAuthToken)
+
         if (captchaSolution != null) {
             request
                 .setHeader("x-captcha-key", captchaSolution.key)
@@ -51,16 +59,14 @@ object QuestsApi {
 
     private inline fun <reified T> post(path: String, body: Any, customToken: String? = null): T {
         return runWithRetry {
+            val token = if (!customToken.isNullOrBlank()) customToken else defaultAuthToken
             val request = Http.Request.newDiscordRNRequest(path, "POST")
-            if (customToken != null) {
-                request.setHeader("Authorization", customToken)
-            }
+                .setHeader("Authorization", token)
+
             request.executeWithJson(GsonUtils.gsonRestApi, body).readJson()
         }
     }
 
-    // ✅ نفس منطق axiosInstance.ts في بوت الديسكورد — لو ديسكورد رجّع 429،
-    // نستنى ونعيد المحاولة بدل ما نفشل فورًا (بحد أقصى 3 محاولات، وقت متزايد).
     private inline fun <T> runWithRetry(attempt: () -> T): T {
         var lastError: QuestApiException? = null
         repeat(3) { attemptIndex ->
@@ -107,6 +113,8 @@ object QuestsApi {
 
             val message = if (challenge != null) {
                 "Discord requires a captcha"
+            } else if (response.statusCode == 401) {
+                "Unauthorized"
             } else {
                 error?.message ?: "Discord returned HTTP ${response.statusCode}"
             }
