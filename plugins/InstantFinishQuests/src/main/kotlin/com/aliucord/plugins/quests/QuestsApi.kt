@@ -1,11 +1,14 @@
 package com.aliucord.plugins.quests
 
 import com.aliucord.Http
+import com.aliucord.Logger
 import com.aliucord.utils.GsonUtils
 
 object QuestsApi {
+    private val logger = Logger("InstantFinishQuests")
+
     fun getQuests(): QuestsResponse {
-        return Http.Request.newDiscordRNRequest("/quests/@me", "GET").execute().readJson()
+        return runWithRetry { Http.Request.newDiscordRNRequest("/quests/@me", "GET").execute().readJson() }
     }
 
     fun enroll(quest: Quest, customToken: String? = null): QuestUserStatus {
@@ -18,6 +21,12 @@ object QuestsApi {
 
     fun reportVideoProgress(questId: String, timestamp: Double): QuestUserStatus {
         return post("/quests/$questId/video-progress", VideoProgressRequest(timestamp))
+    }
+
+    // ✅ نفس آلية PLAY_ON_DESKTOP / PLAY_ACTIVITY الموجودة في بوت الديسكورد —
+    // نداء REST واحد بدل الحاجة لمتصفح أو نشاط حقيقي.
+    fun heartbeat(questId: String, streamKey: String): QuestUserStatus {
+        return post("/quests/$questId/heartbeat", HeartbeatRequest(streamKey))
     }
 
     fun claimReward(quest: Quest, captchaSolution: QuestCaptchaSolution? = null): QuestUserStatus {
@@ -35,26 +44,53 @@ object QuestsApi {
                 .setHeader("x-captcha-rqtoken", captchaSolution.rqtoken)
                 .setHeader("x-captcha-session-id", captchaSolution.sessionId)
         }
-        return request
-            .executeWithJson(GsonUtils.gsonRestApi, body)
-            .readJson()
+        return runWithRetry {
+            request.executeWithJson(GsonUtils.gsonRestApi, body).readJson()
+        }
     }
 
     private inline fun <reified T> post(path: String, body: Any, customToken: String? = null): T {
-        val request = Http.Request.newDiscordRNRequest(path, "POST")
-        if (customToken != null) {
-            request.setHeader("Authorization", customToken)
+        return runWithRetry {
+            val request = Http.Request.newDiscordRNRequest(path, "POST")
+            if (customToken != null) {
+                request.setHeader("Authorization", customToken)
+            }
+            request.executeWithJson(GsonUtils.gsonRestApi, body).readJson()
         }
-        return request.executeWithJson(GsonUtils.gsonRestApi, body).readJson()
+    }
+
+    // ✅ نفس منطق axiosInstance.ts في بوت الديسكورد — لو ديسكورد رجّع 429،
+    // نستنى ونعيد المحاولة بدل ما نفشل فورًا (بحد أقصى 3 محاولات، وقت متزايد).
+    private inline fun <T> runWithRetry(attempt: () -> T): T {
+        var lastError: QuestApiException? = null
+        repeat(3) { attemptIndex ->
+            try {
+                return attempt()
+            } catch (e: QuestApiException) {
+                lastError = e
+                if (e.statusCode == 429) {
+                    val waitMs = 5000L * (attemptIndex + 1)
+                    logger.warn("Rate limited (429), waiting ${waitMs}ms before retry ${attemptIndex + 1}/3")
+                    Thread.sleep(waitMs)
+                } else {
+                    throw e
+                }
+            }
+        }
+        throw lastError ?: QuestApiException(429, null, "Rate limited after 3 retries")
     }
 
     private inline fun <reified T> Http.Response.readJson(): T = use { response ->
         if (!response.ok()) {
-            val errorBody = runCatching { response.text() }.getOrNull() ?: ""
+            val httpException = runCatching { response.assertOk() }.exceptionOrNull()
+            val errorBody = httpException?.message?.substringAfter('\n', "").orEmpty()
+
+            logger.error("Discord API error [${response.statusCode}] body=$errorBody", null)
+
             val error = runCatching {
                 GsonUtils.fromJson(errorBody, QuestApiError::class.java)
             }.getOrNull()
-            
+
             val challenge = error?.let {
                 if (!it.captchaKey.isNullOrEmpty() && it.captchaSiteKey != null &&
                     it.captchaRqdata != null && it.captchaRqtoken != null &&
@@ -68,8 +104,12 @@ object QuestsApi {
                     )
                 } else null
             }
-            
-            val message = if (challenge != null) "Captcha required" else error?.message ?: "Unable to complete request"
+
+            val message = if (challenge != null) {
+                "Discord requires a captcha"
+            } else {
+                error?.message ?: "Discord returned HTTP ${response.statusCode}"
+            }
             throw QuestApiException(response.statusCode, challenge, message)
         }
         response.json(GsonUtils.gsonRestApi, T::class.java)
