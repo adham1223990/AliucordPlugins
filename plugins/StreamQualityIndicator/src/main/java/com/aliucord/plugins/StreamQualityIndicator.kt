@@ -1,9 +1,6 @@
 package com.aliucord.plugins
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.widget.Toast
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -29,7 +26,7 @@ class StreamQualityIndicator : Plugin() {
                 val clazz = Class.forName(className)
                 for (method in clazz.declaredMethods) {
                     val methodName = method.name.lowercase()
-                    // Target methods that set or update stream resolution/FPS parameters
+                    // Target methods handling stream presets, quality updates, or settings
                     if (methodName.contains("quality") || methodName.contains("preset") || methodName.contains("streamsettings")) {
                         patcher.patch(method, Hook { param: XC_MethodHook.MethodHookParam ->
                             inspectArgumentsAndNotify(param.args)
@@ -37,7 +34,7 @@ class StreamQualityIndicator : Plugin() {
                     }
                 }
             } catch (_: ClassNotFoundException) {
-                // Ignore missing classes in current Discord build
+                // Ignore missing classes in current build
             }
         }
     }
@@ -45,26 +42,32 @@ class StreamQualityIndicator : Plugin() {
     private fun inspectArgumentsAndNotify(args: Array<Any?>?) {
         if (args == null || args.isEmpty()) return
 
-        val details = StringBuilder()
+        var resolution = ""
+        var fps = ""
+
         for (arg in args) {
             if (arg != null) {
                 val str = arg.toString()
-                if (str.contains("720") || str.contains("1080") || str.contains("60") || str.contains("30") || str.contains("FPS")) {
-                    details.append(str).append(" ")
-                }
+                if (str.contains("1080")) resolution = "1080p"
+                else if (str.contains("720")) resolution = "720p"
+                else if (str.contains("480")) resolution = "480p"
+
+                if (str.contains("60")) fps = "60 FPS"
+                else if (str.contains("30")) fps = "30 FPS"
+                else if (str.contains("15")) fps = "15 FPS"
             }
         }
 
-        if (details.isNotEmpty()) {
-            val message = "Selected Stream Quality: $details"
-            logger.info(message)
-            showToast(message)
-        }
-    }
+        if (resolution.isNotEmpty() || fps.isNotEmpty()) {
+            val message = if (resolution.isNotEmpty() && fps.isNotEmpty()) {
+                "Stream Quality: $resolution @ $fps"
+            } else {
+                "Stream Quality: ${resolution.ifEmpty { fps }}"
+            }
 
-    private fun showToast(text: String) {
-        Handler(Looper.getMainLooper()).post {
-            Toast.makeText(Utils.appContext, text, Toast.LENGTH_LONG).show()
+            logger.info(message)
+            // Displays the stylish Aliucord custom toast banner
+            Utils.showToast(message)
         }
     }
 
@@ -72,4 +75,3 @@ class StreamQualityIndicator : Plugin() {
         patcher.unpatchAll()
     }
 }
-
