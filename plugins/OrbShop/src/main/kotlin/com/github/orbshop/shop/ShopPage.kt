@@ -346,7 +346,7 @@ class ShopPage(private val prefs: SettingsAPI) : SettingsPage() {
                 results.addView(primaryButton(ctx, "Try again") { reload() })
             }
 
-            cat == null -> Unit
+            cat == null -> {}
 
             else -> {
                 currentList = filters.apply(cat.items, owned, balance)
