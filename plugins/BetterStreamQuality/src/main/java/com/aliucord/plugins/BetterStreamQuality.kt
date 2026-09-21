@@ -4,7 +4,7 @@ import android.content.Context
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
-import com.aliucord.patcher.PinePatchFn
+import de.robv.android.xposed.XC_MethodHook
 import java.lang.reflect.Method
 
 @AliucordPlugin
@@ -34,9 +34,9 @@ class BetterStreamQuality : Plugin() {
                     val getPremiumTierMethod: Method = clazz.getDeclaredMethod("getPremiumTier")
 
                     // Patch getPremiumTier to always return TIER_2
-                    patcher.patch(getPremiumTierMethod, Hook(PinePatchFn { callFrame ->
-                        callFrame.result = tier2Enum
-                    }))
+                    patcher.patch(getPremiumTierMethod, Hook { param: XC_MethodHook.MethodHookParam ->
+                        param.result = tier2Enum
+                    })
                 } catch (e: Exception) {
                     logger.error("Failed to hook getPremiumTier in $className", e)
                 }
@@ -64,9 +64,9 @@ class BetterStreamQuality : Plugin() {
                         (method.name.contains("Stream", ignoreCase = true) || 
                          method.name.contains("VideoUpload", ignoreCase = true))) {
                         
-                        patcher.patch(method, Hook(PinePatchFn { callFrame ->
-                            callFrame.result = true
-                        }))
+                        patcher.patch(method, Hook { param: XC_MethodHook.MethodHookParam ->
+                            param.result = true
+                        })
                     }
                 }
             } catch (_: ClassNotFoundException) {
