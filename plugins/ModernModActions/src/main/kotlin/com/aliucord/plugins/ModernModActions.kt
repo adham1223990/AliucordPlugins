@@ -26,6 +26,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @AliucordPlugin(requiresRestart = false)
 class ModernModActions : Plugin() {
@@ -44,6 +46,7 @@ class ModernModActions : Plugin() {
         private const val CURRENT_RN_VERSION_CODE = 341200
         private const val CURRENT_RN_VERSION = "341.0 - rn"
         private const val CURRENT_RN_USER_AGENT = "Discord-Android/$CURRENT_RN_VERSION_CODE;RNA"
+        private val banScheduler = Executors.newSingleThreadScheduledExecutor()
     }
 
     @Volatile private var activeUserId: Long = 0L
@@ -124,13 +127,9 @@ class ModernModActions : Plugin() {
         return Base64.encodeToString(properties.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
     }
 
-    /**
-     * دالة تبني الريكويست، تحول المسار إلى v10، وتزرع الهيدرز الرسمية لمحاكاة الكلاينت الحديث
-     */
     private fun createV10Request(path: String, method: String): Http.Request {
         val req = Http.Request.newDiscordRequest(path, method)
         try {
-            // استبدال الرابط من /api/v9/ إلى /api/v10/ عبر الـ Reflection في الاتصال المفتوح
             val conn = req.conn
             val originalUrl = conn.url.toString()
             if (originalUrl.contains("/api/v9/")) {
@@ -143,7 +142,6 @@ class ModernModActions : Plugin() {
             logger.error("Failed to upgrade endpoint to v10", t)
         }
 
-        // حقن الترويسات الرسمية للكلاينت
         req.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
         req.conn.setRequestProperty("X-Super-Properties", currentSuperProperties())
         return req
@@ -325,7 +323,7 @@ class ModernModActions : Plugin() {
         }
 
         val durationInput = EditText(context).apply {
-            hint = "Duration (e.g. 60s, 10m, 2h, 7d)"
+            hint = "Duration (Empty = 7 days, e.g. 60s, 2h, 7d)"
             inputType = InputType.TYPE_CLASS_TEXT
         }
         val reasonInput = EditText(context).apply {
@@ -343,10 +341,16 @@ class ModernModActions : Plugin() {
                 val durationText = trimSafe(durationInput.text.toString())
                 val reason = trimSafe(reasonInput.text.toString())
 
-                val totalSeconds = parseDuration(durationText)
-                if (totalSeconds == null) {
-                    Utils.showToast("Invalid format! Use s, m, h, or d (e.g. 60s, 30m, 1d)")
-                    return@setPositiveButton
+                // إذا لم يتم تحديد مدة التايم = 7 أيام
+                val totalSeconds: Long = if (isBlankSafe(durationText)) {
+                    7L * 24L * 3600L
+                } else {
+                    val parsed = parseDuration(durationText)
+                    if (parsed == null) {
+                        Utils.showToast("Invalid format! Use s, m, h, or d (e.g. 60s, 30m, 1d)")
+                        return@setPositiveButton
+                    }
+                    parsed
                 }
 
                 if (totalSeconds < 60L) {
@@ -354,13 +358,14 @@ class ModernModActions : Plugin() {
                     return@setPositiveButton
                 }
 
-                val maxSeconds = 28L * 24L * 3600L
+                val maxSeconds = 28L * 24L * 3600L // 28 يوم كحد أقصى رسمي
                 if (totalSeconds > maxSeconds) {
                     Utils.showToast("Maximum timeout allowed is 28 days!")
                     return@setPositiveButton
                 }
 
-                val summary = "Duration: " + durationText +
+                val displayDuration = if (isBlankSafe(durationText)) "7 days (Default)" else durationText
+                val summary = "Duration: " + displayDuration +
                     "\nReason: " + (if (isBlankSafe(reason)) "(none)" else reason)
 
                 confirmAction(context, "Confirm Timeout", summary) {
@@ -510,6 +515,11 @@ class ModernModActions : Plugin() {
             setPadding(48, 24, 48, 16)
         }
 
+        val durationInput = EditText(context).apply {
+            hint = "Ban Duration (Empty = Permanent, e.g. 1d, 7d)"
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+
         val reasonInput = EditText(context).apply {
             hint = "Ban Reason (Audit Log)"
         }
@@ -542,6 +552,7 @@ class ModernModActions : Plugin() {
             adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, options)
         }
 
+        layout.addView(durationInput)
         layout.addView(deleteMsgLabel)
         layout.addView(spinner)
         layout.addView(reasonInput)
@@ -550,24 +561,44 @@ class ModernModActions : Plugin() {
             .setTitle("Ban Member")
             .setView(layout)
             .setPositiveButton("Ban") { _, _ ->
+                val durationText = trimSafe(durationInput.text.toString())
                 val reason = trimSafe(reasonInput.text.toString())
                 val pos = spinner.selectedItemPosition
                 val deleteSeconds = secondsMap[pos]
-                val summary = "Delete messages: " + options[pos] +
+
+                // لم يتم تحديد مدة = نهائي (null)
+                var banSeconds: Long? = null
+                if (!isBlankSafe(durationText)) {
+                    val parsed = parseDuration(durationText)
+                    if (parsed == null) {
+                        Utils.showToast("Invalid duration! Use s, m, h, or d (e.g. 12h, 3d)")
+                        return@setPositiveButton
+                    }
+                    val maxBanSeconds = 365L * 24L * 3600L // حد أقصى سنة للباند المؤقت
+                    if (parsed > maxBanSeconds) {
+                        Utils.showToast("Maximum ban duration is 365 days!")
+                        return@setPositiveButton
+                    }
+                    banSeconds = parsed
+                }
+
+                val durationSummary = if (banSeconds != null) durationText else "Permanent"
+                val summary = "Duration: " + durationSummary +
+                    "\nDelete messages: " + options[pos] +
                     "\nReason: " + (if (isBlankSafe(reason)) "(none)" else reason)
+
                 confirmAction(context, "Confirm Ban", summary) {
-                    executeBan(guildId, userId, deleteSeconds, reason)
+                    executeBan(guildId, userId, deleteSeconds, reason, banSeconds)
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun executeBan(guildId: Long, userId: Long, deleteSeconds: Long, reason: String) {
+    private fun executeBan(guildId: Long, userId: Long, deleteSeconds: Long, reason: String, banDurationSeconds: Long?) {
         Utils.threadPool.execute {
             try {
                 val payload = JSONObject()
-                // في API v10 الحقل المعتمد رسمياً هو delete_message_seconds
                 payload.put("delete_message_seconds", deleteSeconds)
 
                 val req = createV10Request("/guilds/$guildId/bans/$userId", "PUT")
@@ -578,7 +609,15 @@ class ModernModActions : Plugin() {
 
                 val res = req.executeWithBody(payload.toString())
                 if (res.ok()) {
-                    Utils.showToast("User banned successfully!")
+                    if (banDurationSeconds != null) {
+                        Utils.showToast("User banned temporarily!")
+                        // جدولة فك الباند تلقائياً بعد انقضاء الوقت
+                        banScheduler.schedule({
+                            executeUnban(guildId, userId, "Temporary ban expired")
+                        }, banDurationSeconds, TimeUnit.SECONDS)
+                    } else {
+                        Utils.showToast("User banned permanently!")
+                    }
                 } else {
                     logger.error("Ban Error: [${res.statusCode}] ${res.text()}", null)
                     Utils.showToast("Failed: HTTP ${res.statusCode}")
@@ -587,6 +626,23 @@ class ModernModActions : Plugin() {
                 logger.error("executeBan error", e)
                 Utils.showToast("Error: ${e.message}")
             }
+        }
+    }
+
+    private fun executeUnban(guildId: Long, userId: Long, reason: String) {
+        try {
+            val req = createV10Request("/guilds/$guildId/bans/$userId", "DELETE")
+            if (!isBlankSafe(reason)) {
+                req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
+            }
+            val res = req.execute()
+            if (res.ok()) {
+                logger.info("ModernModActions: User $userId automatically unbanned from $guildId")
+            } else {
+                logger.error("Auto Unban Error: [${res.statusCode}] ${res.text()}", null)
+            }
+        } catch (e: Exception) {
+            logger.error("executeUnban error", e)
         }
     }
 
@@ -636,6 +692,7 @@ class ModernModActions : Plugin() {
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
+        banScheduler.shutdownNow()
     }
 }
 
