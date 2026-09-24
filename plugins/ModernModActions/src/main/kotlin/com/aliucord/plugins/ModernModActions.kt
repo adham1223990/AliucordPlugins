@@ -13,6 +13,7 @@ import com.aliucord.patcher.Hook
 import com.discord.stores.StoreStream
 import com.discord.widgets.user.profile.UserProfileAdminView
 import com.discord.widgets.user.usersheet.WidgetUserSheet
+import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.reflect.Method
 import java.net.URLEncoder
@@ -220,7 +221,7 @@ class ModernModActions : Plugin() {
                             return@setOnClickListener
                         }
                         if (!hasPermission(guildId, permission)) {
-                            Utils.showToast("You don't have permission to do that here.")
+                            Utils.showToast("Missing permissions")
                             return@setOnClickListener
                         }
                         showDialog(adminView.context, guildId, userId)
@@ -372,9 +373,52 @@ class ModernModActions : Plugin() {
         return if (foundAny) total else null
     }
 
+    /**
+     * بيشيك لو الشخص المستهدف معاه Administrator (من رتبه). ديسكورد بيمنع الـ Timeout عن الأدمنز.
+     * بيرجع null لو معرفناش نتأكد (وقتها بنكمل عادي ونسيب ديسكورد يقرر).
+     */
+    private fun targetIsAdmin(guildId: Long, userId: Long): Boolean? {
+        try {
+            val memRes = Http.Request.newDiscordRequest("/guilds/$guildId/members/$userId", "GET").execute()
+            if (!memRes.ok()) return null
+            val memberRoles = JSONObject(memRes.text()).optJSONArray("roles") ?: return null
+
+            val rolesRes = Http.Request.newDiscordRequest("/guilds/$guildId/roles", "GET").execute()
+            if (!rolesRes.ok()) return null
+            val allRoles = JSONArray(rolesRes.text())
+
+            val ids = HashSet<String>()
+            ids.add(guildId.toString()) // رتبة @everyone id بتاعها = id السيرفر
+            var i = 0
+            while (i < memberRoles.length()) {
+                ids.add(memberRoles.getString(i))
+                i++
+            }
+
+            var j = 0
+            while (j < allRoles.length()) {
+                val role = allRoles.getJSONObject(j)
+                if (ids.contains(role.optString("id"))) {
+                    val perms = java.lang.Long.parseLong(role.optString("permissions", "0"))
+                    if ((perms and Perm.ADMINISTRATOR) != 0L) return true
+                }
+                j++
+            }
+            return false
+        } catch (e: Throwable) {
+            logger.error("targetIsAdmin check failed", e)
+            return null
+        }
+    }
+
     private fun executeTimeout(guildId: Long, userId: Long, durationSeconds: Long?, reason: String) {
         Utils.threadPool.execute {
             try {
+                if (durationSeconds != null && targetIsAdmin(guildId, userId) == true) {
+                    Utils.showToast("Administrators can't be timed out")
+                    return@execute
+                }
+
                 var isoTimestamp: String? = null
                 if (durationSeconds != null) {
                     val date = Date(System.currentTimeMillis() + (durationSeconds * 1000L))
@@ -396,8 +440,19 @@ class ModernModActions : Plugin() {
                 if (res.ok()) {
                     Utils.showToast(if (durationSeconds != null) "Timeout applied!" else "Timeout removed!")
                 } else {
-                    logger.error("Timeout Error: [${res.statusCode}] ${res.text()}", null)
-                    Utils.showToast("Failed: HTTP ${res.statusCode}")
+                    val body = res.text()
+                    logger.error("Timeout Error: [${res.statusCode}] $body", null)
+                    if (res.statusCode == 403) {
+                        Utils.showToast("Missing permissions")
+                    } else {
+                        var detail = "HTTP " + res.statusCode
+                        try {
+                            val j = JSONObject(body)
+                            detail = "HTTP " + res.statusCode + " (code " + j.optInt("code") + "): " + j.optString("message")
+                        } catch (ignored: Throwable) {
+                        }
+                        Utils.showToast("Failed: $detail")
+                    }
                 }
             } catch (e: Exception) {
                 logger.error("executeTimeout error", e)
