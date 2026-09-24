@@ -44,17 +44,17 @@ class ModernModActions : Plugin() {
 
                     if (userId == 0L || guildId == 0L) return@Hook
 
-                    // 1. زر التايم أوت
+                    // 1. زر التايم أوت الحديث
                     bindClick(adminView, "user_profile_admin_disable_communication") {
                         showTimeoutDialog(adminView.context, guildId, userId)
                     }
 
-                    // 2. زر الباند
+                    // 2. زر الباند الحديث
                     bindClick(adminView, "user_profile_admin_ban") {
                         showBanDialog(adminView.context, guildId, userId)
                     }
 
-                    // 3. زر الكيك
+                    // 3. زر الكيك الحديث
                     bindClick(adminView, "user_profile_admin_kick") {
                         showKickDialog(adminView.context, guildId, userId)
                     }
@@ -74,7 +74,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Timeout
+    // واجهة وطلب الـ Timeout الحديث
     // ==========================================
     private fun showTimeoutDialog(context: Context, guildId: Long, userId: Long) {
         val layout = LinearLayout(context).apply {
@@ -112,7 +112,7 @@ class ModernModActions : Plugin() {
                     return@setPositiveButton
                 }
 
-                val maxSeconds = 28L * 24 * 3600
+                val maxSeconds = 28L * 24 * 3600 // 28 يوم كحد أقصى رسمي
                 if (totalSeconds > maxSeconds) {
                     Utils.showToast("Maximum timeout allowed is 28 days!")
                     return@setPositiveButton
@@ -127,7 +127,6 @@ class ModernModActions : Plugin() {
             .show()
     }
 
-    @Suppress("DEPRECATION")
     private fun parseDuration(input: String): Long? {
         if (input.isBlank()) return null
         var totalSeconds = 0L
@@ -137,7 +136,8 @@ class ModernModActions : Plugin() {
         while (matcher.find()) {
             foundAny = true
             val count = matcher.group(1)?.toLongOrNull() ?: return null
-            val unit = matcher.group(2)?.firstOrNull()?.toLowerCase() ?: return null
+            val unitStr = matcher.group(2)?.lowercase(Locale.ROOT) ?: return null
+            val unit = unitStr.firstOrNull() ?: return null
 
             totalSeconds += when (unit) {
                 's' -> count
@@ -186,7 +186,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Ban
+    // واجهة وطلب الـ Ban الحديث
     // ==========================================
     private fun showBanDialog(context: Context, guildId: Long, userId: Long) {
         val layout = LinearLayout(context).apply {
@@ -270,7 +270,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Kick
+    // واجهة وطلب الـ Kick الحديث
     // ==========================================
     private fun showKickDialog(context: Context, guildId: Long, userId: Long) {
         val input = EditText(context).apply {
