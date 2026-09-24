@@ -6,7 +6,6 @@ import android.text.InputType
 import android.view.View
 import android.widget.*
 import com.aliucord.Http
-import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
@@ -23,11 +22,9 @@ import java.util.regex.Pattern
 
 @AliucordPlugin(requiresRestart = false)
 class ModernModActions : Plugin() {
-    private val logger = Logger("ModernModActions")
 
     override fun start(context: Context) {
         try {
-            // عمل Hook على updateView للتأكد من ربط الأزرار بالـ User و الـ Guild الصحيحين
             patcher.patch(
                 UserProfileAdminView::class.java,
                 "updateView",
@@ -35,10 +32,8 @@ class ModernModActions : Plugin() {
                 Hook { frame ->
                     val adminView = frame.thisObject as UserProfileAdminView
 
-                    // جلب معرف السيرفر الحالي
                     val selectedGuildId = StoreStream.getGuildSelected().selectedGuildId
 
-                    // استخراج الـ User ID من الـ Context / FragmentManager بأمان
                     val sheet = Utils.appActivity.supportFragmentManager.fragments
                         .filterIsInstance<WidgetUserSheet>()
                         .firstOrNull { it.isVisible }
@@ -49,17 +44,17 @@ class ModernModActions : Plugin() {
 
                     if (userId == 0L || guildId == 0L) return@Hook
 
-                    // 1. زر التايم أوت (Disable Communication)
+                    // 1. زر التايم أوت
                     bindClick(adminView, "user_profile_admin_disable_communication") {
                         showTimeoutDialog(adminView.context, guildId, userId)
                     }
 
-                    // 2. زر الباند (Ban)
+                    // 2. زر الباند
                     bindClick(adminView, "user_profile_admin_ban") {
                         showBanDialog(adminView.context, guildId, userId)
                     }
 
-                    // 3. زر الكيك (Kick)
+                    // 3. زر الكيك
                     bindClick(adminView, "user_profile_admin_kick") {
                         showKickDialog(adminView.context, guildId, userId)
                     }
@@ -79,7 +74,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Timeout الحديث
+    // واجهة وطلب الـ Timeout
     // ==========================================
     private fun showTimeoutDialog(context: Context, guildId: Long, userId: Long) {
         val layout = LinearLayout(context).apply {
@@ -117,7 +112,7 @@ class ModernModActions : Plugin() {
                     return@setPositiveButton
                 }
 
-                val maxSeconds = 28L * 24 * 3600 // 28 يوم كحد أقصى رسمي
+                val maxSeconds = 28L * 24 * 3600
                 if (totalSeconds > maxSeconds) {
                     Utils.showToast("Maximum timeout allowed is 28 days!")
                     return@setPositiveButton
@@ -132,6 +127,7 @@ class ModernModActions : Plugin() {
             .show()
     }
 
+    @Suppress("DEPRECATION")
     private fun parseDuration(input: String): Long? {
         if (input.isBlank()) return null
         var totalSeconds = 0L
@@ -141,7 +137,7 @@ class ModernModActions : Plugin() {
         while (matcher.find()) {
             foundAny = true
             val count = matcher.group(1)?.toLongOrNull() ?: return null
-            val unit = matcher.group(2)?.lowercaseChar() ?: return null
+            val unit = matcher.group(2)?.firstOrNull()?.toLowerCase() ?: return null
 
             totalSeconds += when (unit) {
                 's' -> count
@@ -190,7 +186,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Ban الحديث
+    // واجهة وطلب الـ Ban
     // ==========================================
     private fun showBanDialog(context: Context, guildId: Long, userId: Long) {
         val layout = LinearLayout(context).apply {
@@ -274,7 +270,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Kick الحديث
+    // واجهة وطلب الـ Kick
     // ==========================================
     private fun showKickDialog(context: Context, guildId: Long, userId: Long) {
         val input = EditText(context).apply {
