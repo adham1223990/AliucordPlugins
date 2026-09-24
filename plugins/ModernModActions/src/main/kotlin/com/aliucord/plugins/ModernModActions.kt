@@ -31,7 +31,19 @@ class ModernModActions : Plugin() {
         const val MODERATE_MEMBERS = 1L shl 40 // Timeout Members
     }
 
+    /**
+     * The ids of whichever WidgetUserSheet most recently reached onViewCreated. We used to
+     * re-derive these at click time by scanning the FragmentManager for a "visible" sheet,
+     * which is unreliable (isVisible on a bottom-sheet fragment isn't guaranteed true, and it
+     * breaks entirely if sheets are stacked). Instead we capture them once, straight from the
+     * sheet's own trusted argument bundle, at the exact point Discord itself reads them
+     * (WidgetUserSheet.onViewCreated) to wire up its own admin-section listeners.
+     */
+    @Volatile private var activeUserId: Long = 0L
+    @Volatile private var activeGuildId: Long = 0L
+
     override fun start(context: Context) {
+        patchSheetArgs()
         patchVisibility()
         patchClick("setOnBan", "user_profile_admin_ban", Perm.BAN_MEMBERS) { ctx, guildId, userId ->
             showBanDialog(ctx, guildId, userId)
@@ -45,6 +57,43 @@ class ModernModActions : Plugin() {
             Perm.MODERATE_MEMBERS
         ) { ctx, guildId, userId ->
             showTimeoutDialog(ctx, guildId, userId)
+        }
+    }
+
+    /**
+     * WidgetUserSheet.onViewCreated(View, Bundle) reads ARG_USER_ID off its own arguments
+     * right at the top of the method, then uses it (among other things) to wire up
+     * getBinding().k.setOnKick/setOnBan/setOnDisableCommunication — the exact click listeners
+     * we patch below. We hook that same method so we read the ids from the one fragment
+     * instance Discord itself is currently binding, instead of guessing which fragment in the
+     * manager is "the" visible one.
+     */
+    private fun patchSheetArgs() {
+        val method = WidgetUserSheet::class.java.declaredMethods.firstOrNull {
+            it.name == "onViewCreated" && it.parameterTypes.size == 2
+        }
+        if (method == null) {
+            Utils.showToast(
+                "ModernModActions: could NOT find onViewCreated on WidgetUserSheet. " +
+                    "Discord's class layout changed; this plugin needs an update."
+            )
+            return
+        }
+        try {
+            patcher.patch(method, Hook { frame ->
+                try {
+                    val sheet = frame.thisObject as? WidgetUserSheet ?: return@Hook
+                    val args = sheet.arguments ?: return@Hook
+                    activeUserId = args.getLong("ARG_USER_ID")
+                    val argGuildId = args.getLong("ARG_GUILD_ID")
+                    activeGuildId = if (argGuildId != 0L) argGuildId else StoreStream.getGuildSelected().selectedGuildId
+                } catch (e: Throwable) {
+                    logger.error("ModernModActions: sheet-args hook crashed", e)
+                }
+            })
+            logger.info("ModernModActions: patched WidgetUserSheet.onViewCreated for reliable id capture")
+        } catch (e: Throwable) {
+            logger.error("ModernModActions: failed to patch WidgetUserSheet.onViewCreated", e)
         }
     }
 
@@ -153,17 +202,9 @@ class ModernModActions : Plugin() {
         }
     }
 
-    private fun currentUserSheet(): WidgetUserSheet? = Utils.appActivity.supportFragmentManager.fragments
-        .filterIsInstance<WidgetUserSheet>()
-        .firstOrNull { it.isVisible }
+    private fun currentUserId(): Long = activeUserId
 
-    private fun currentUserId(): Long = currentUserSheet()?.arguments?.getLong("ARG_USER_ID") ?: 0L
-
-    private fun currentGuildId(): Long {
-        val selectedGuildId = StoreStream.getGuildSelected().selectedGuildId
-        val fromArgs = currentUserSheet()?.arguments?.getLong("ARG_GUILD_ID")?.takeIf { it != 0L }
-        return fromArgs ?: selectedGuildId
-    }
+    private fun currentGuildId(): Long = activeGuildId
 
     /**
      * Reads this account's computed permissions in [guildId] from Discord's own permission
