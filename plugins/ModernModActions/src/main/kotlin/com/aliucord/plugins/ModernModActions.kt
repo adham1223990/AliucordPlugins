@@ -14,11 +14,12 @@ import com.discord.stores.StoreStream
 import com.discord.widgets.user.profile.UserProfileAdminView
 import com.discord.widgets.user.usersheet.WidgetUserSheet
 import org.json.JSONObject
+import java.lang.reflect.Method
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
-import java.util.*
-import java.util.concurrent.TimeUnit
-import java.util.regex.Pattern
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 @AliucordPlugin(requiresRestart = false)
 class ModernModActions : Plugin() {
@@ -31,16 +32,58 @@ class ModernModActions : Plugin() {
         const val MODERATE_MEMBERS = 1L shl 40 // Timeout Members
     }
 
-    /**
-     * The ids of whichever WidgetUserSheet most recently reached onViewCreated. We used to
-     * re-derive these at click time by scanning the FragmentManager for a "visible" sheet,
-     * which is unreliable (isVisible on a bottom-sheet fragment isn't guaranteed true, and it
-     * breaks entirely if sheets are stacked). Instead we capture them once, straight from the
-     * sheet's own trusted argument bundle, at the exact point Discord itself reads them
-     * (WidgetUserSheet.onViewCreated) to wire up its own admin-section listeners.
-     */
     @Volatile private var activeUserId: Long = 0L
     @Volatile private var activeGuildId: Long = 0L
+
+    // ==========================================================
+    // Safe helpers: بدائل لدوال Kotlin stdlib اللي بتعمل كراش
+    // (isBlank / trim / toLongOrNull / lowercase / regex / firstOrNull ...)
+    // كلها بتستخدم while loops و charAt بس، من غير IntRange/IntIterator.
+    // ==========================================================
+
+    private fun isBlankSafe(s: String?): Boolean {
+        if (s == null) return true
+        var i = 0
+        val n = s.length
+        while (i < n) {
+            if (!Character.isWhitespace(s[i])) return false
+            i++
+        }
+        return true
+    }
+
+    private fun trimSafe(s: String?): String {
+        if (s == null) return ""
+        var start = 0
+        var end = s.length
+        while (start < end && Character.isWhitespace(s[start])) start++
+        while (end > start && Character.isWhitespace(s[end - 1])) end--
+        return s.substring(start, end)
+    }
+
+    private fun findMethod(cls: Class<*>, name: String, paramCount: Int = -1): Method? {
+        val all = cls.declaredMethods
+        var i = 0
+        while (i < all.size) {
+            val m = all[i]
+            if (m.name == name && (paramCount < 0 || m.parameterTypes.size == paramCount)) return m
+            i++
+        }
+        return null
+    }
+
+    private fun findMethods(cls: Class<*>, name: String): List<Method> {
+        val result = ArrayList<Method>()
+        val all = cls.declaredMethods
+        var i = 0
+        while (i < all.size) {
+            if (all[i].name == name) result.add(all[i])
+            i++
+        }
+        return result
+    }
+
+    // ==========================================================
 
     override fun start(context: Context) {
         patchSheetArgs()
@@ -61,17 +104,11 @@ class ModernModActions : Plugin() {
     }
 
     /**
-     * WidgetUserSheet.onViewCreated(View, Bundle) reads ARG_USER_ID off its own arguments
-     * right at the top of the method, then uses it (among other things) to wire up
-     * getBinding().k.setOnKick/setOnBan/setOnDisableCommunication — the exact click listeners
-     * we patch below. We hook that same method so we read the ids from the one fragment
-     * instance Discord itself is currently binding, instead of guessing which fragment in the
-     * manager is "the" visible one.
+     * WidgetUserSheet.onViewCreated(View, Bundle) بيقرا ARG_USER_ID من الـ arguments بتاعته،
+     * فبنعمل hook عليه ونحفظ الـ ids من نفس الـ fragment instance اللي ديسكورد بيربطه.
      */
     private fun patchSheetArgs() {
-        val method = WidgetUserSheet::class.java.declaredMethods.firstOrNull {
-            it.name == "onViewCreated" && it.parameterTypes.size == 2
-        }
+        val method = findMethod(WidgetUserSheet::class.java, "onViewCreated", 2)
         if (method == null) {
             Utils.showToast(
                 "ModernModActions: could NOT find onViewCreated on WidgetUserSheet. " +
@@ -86,7 +123,8 @@ class ModernModActions : Plugin() {
                     val args = sheet.arguments ?: return@Hook
                     activeUserId = args.getLong("ARG_USER_ID")
                     val argGuildId = args.getLong("ARG_GUILD_ID")
-                    activeGuildId = if (argGuildId != 0L) argGuildId else StoreStream.getGuildSelected().selectedGuildId
+                    activeGuildId =
+                        if (argGuildId != 0L) argGuildId else StoreStream.getGuildSelected().selectedGuildId
                 } catch (e: Throwable) {
                     logger.error("ModernModActions: sheet-args hook crashed", e)
                 }
@@ -98,13 +136,11 @@ class ModernModActions : Plugin() {
     }
 
     /**
-     * updateView(ViewState) only ever touches visibility/text/icons — it never sets a click
-     * listener. We patch it purely to ADD an extra hide when this account lacks the relevant
-     * permission; we never force a button VISIBLE here, since Discord's own ViewState already
-     * encodes other reasons to hide it (e.g. you can't ban/kick/timeout yourself).
+     * بنخفي الزرار بس لو الحساب مالوش الصلاحية. عمرنا ما بنجبر زرار يظهر
+     * لأن ديسكورد عنده أسباب تانية للإخفاء (مثلاً مينفعش تبان نفسك).
      */
     private fun patchVisibility() {
-        val methods = UserProfileAdminView::class.java.declaredMethods.filter { it.name == "updateView" }
+        val methods = findMethods(UserProfileAdminView::class.java, "updateView")
         if (methods.isEmpty()) {
             Utils.showToast(
                 "ModernModActions: could NOT find updateView on UserProfileAdminView. " +
@@ -142,15 +178,13 @@ class ModernModActions : Plugin() {
         if (hasPermission(guildId, permission)) return // leave Discord's own decision alone
         val resId = Utils.getResId(resourceName, "id")
         if (resId == 0) return
-        root.findViewById<View>(resId)?.visibility = View.GONE
+        val v = root.findViewById<View>(resId)
+        if (v != null) v.visibility = View.GONE
     }
 
     /**
-     * The real click wiring happens in these setters (setOnBan/setOnKick/setOnDisableCommunication),
-     * NOT in updateView. Discord calls the matching setter with its own lambda, which opens the
-     * native dialog. We patch the setter itself and re-assign our own click listener straight
-     * after the original runs, so we always have the final word on that button's click listener
-     * no matter when Discord calls it relative to updateView.
+     * الربط الحقيقي للـ click بيحصل في الـ setters (setOnBan/setOnKick/setOnDisableCommunication).
+     * بنعمل patch للـ setter ونعيّن الـ listener بتاعنا بعد ما الأصلي يخلص.
      */
     private fun patchClick(
         setterName: String,
@@ -158,7 +192,7 @@ class ModernModActions : Plugin() {
         permission: Long,
         showDialog: (Context, Long, Long) -> Unit
     ) {
-        val method = UserProfileAdminView::class.java.declaredMethods.firstOrNull { it.name == setterName }
+        val method = findMethod(UserProfileAdminView::class.java, setterName)
         if (method == null) {
             logger.error("ModernModActions: setter '$setterName' not found on UserProfileAdminView", null)
             Utils.showToast("ModernModActions: '$setterName' not found, this plugin needs an update.")
@@ -207,11 +241,8 @@ class ModernModActions : Plugin() {
     private fun currentGuildId(): Long = activeGuildId
 
     /**
-     * Reads this account's computed permissions in [guildId] from Discord's own permission
-     * store, exactly what QuestUI-style plugins use. If the store can't be read for any
-     * reason we "fail open" (allow) since Discord's API will still reject the request with
-     * HTTP 403 if the permission is genuinely missing — nothing unsafe happens, we just lose
-     * the cosmetic hiding/blocking for that one case.
+     * بيقرا صلاحيات الحساب من permission store بتاع ديسكورد. لو فشل القراءة بنسمح (fail open)
+     * لأن API ديسكورد هيرفض بـ 403 لو الصلاحية فعلاً ناقصة.
      */
     private fun currentGuildPermissions(guildId: Long): Long? = try {
         StoreStream.getPermissions().getGuildPermissions()[guildId]
@@ -225,7 +256,7 @@ class ModernModActions : Plugin() {
         return (perms and flag) != 0L || (perms and Perm.ADMINISTRATOR) != 0L
     }
 
-    /** A second "are you sure?" step so a stray tap never fires a moderation action by itself. */
+    /** خطوة تأكيد تانية عشان ضغطة بالغلط ماتنفذش إجراء عقاب لوحدها. */
     private fun confirmAction(context: Context, title: String, summary: String, onConfirm: () -> Unit) {
         AlertDialog.Builder(context)
             .setTitle(title)
@@ -260,8 +291,8 @@ class ModernModActions : Plugin() {
             .setTitle("Timeout Member")
             .setView(layout)
             .setPositiveButton("Apply") { _, _ ->
-                val durationText = durationInput.text.toString().trim()
-                val reason = reasonInput.text.toString().trim()
+                val durationText = trimSafe(durationInput.text.toString())
+                val reason = trimSafe(reasonInput.text.toString())
 
                 val totalSeconds = parseDuration(durationText)
                 if (totalSeconds == null) {
@@ -269,21 +300,20 @@ class ModernModActions : Plugin() {
                     return@setPositiveButton
                 }
 
-                if (totalSeconds < 60) {
+                if (totalSeconds < 60L) {
                     Utils.showToast("Minimum timeout is 60 seconds!")
                     return@setPositiveButton
                 }
 
-                val maxSeconds = 28L * 24 * 3600 // 28 يوم كحد أقصى رسمي
+                val maxSeconds = 28L * 24L * 3600L // 28 يوم كحد أقصى رسمي
                 if (totalSeconds > maxSeconds) {
                     Utils.showToast("Maximum timeout allowed is 28 days!")
                     return@setPositiveButton
                 }
 
-                val summary = buildString {
-                    append("Duration: ").append(durationText)
-                    append("\nReason: ").append(if (reason.isBlank()) "(none)" else reason)
-                }
+                val summary = "Duration: " + durationText +
+                    "\nReason: " + (if (isBlankSafe(reason)) "(none)" else reason)
+
                 confirmAction(context, "Confirm Timeout", summary) {
                     executeTimeout(guildId, userId, totalSeconds, reason)
                 }
@@ -301,47 +331,64 @@ class ModernModActions : Plugin() {
             .show()
     }
 
-    private fun parseDuration(input: String): Long? {
-        if (input.isBlank()) return null
-        var totalSeconds = 0L
-        val matcher = Pattern.compile("(\\d+)([smhd])", Pattern.CASE_INSENSITIVE).matcher(input)
+    /**
+     * Parser يدوي (char by char) من غير Regex ولا isBlank ولا toLongOrNull ولا lowercase.
+     * بيقبل: 60s / 10m / 2h / 7d / 1h30m / "1h 30m"
+     */
+    private fun parseDuration(input: String?): Long? {
+        if (input == null) return null
+        val n = input.length
+        var total = 0L
+        var current = -1L // -1 = مفيش أرقام لسه
         var foundAny = false
+        var i = 0
 
-        while (matcher.find()) {
-            foundAny = true
-            val count = matcher.group(1)?.toLongOrNull() ?: return null
-            val unitStr = matcher.group(2)?.lowercase(Locale.ROOT) ?: return null
-            val unit = unitStr.firstOrNull() ?: return null
-
-            totalSeconds += when (unit) {
-                's' -> count
-                'm' -> TimeUnit.MINUTES.toSeconds(count)
-                'h' -> TimeUnit.HOURS.toSeconds(count)
-                'd' -> TimeUnit.DAYS.toSeconds(count)
-                else -> 0L
+        while (i < n) {
+            val c = input[i]
+            if (c >= '0' && c <= '9') {
+                val base = if (current < 0L) 0L else current
+                current = base * 10L + (c.code - '0'.code).toLong()
+                if (current > 100000000000L) return null // حماية من overflow
+            } else if (Character.isWhitespace(c)) {
+                // تجاهل المسافات
+            } else {
+                if (current < 0L) return null
+                val mult: Long = when (Character.toLowerCase(c)) {
+                    's' -> 1L
+                    'm' -> 60L
+                    'h' -> 3600L
+                    'd' -> 86400L
+                    else -> return null
+                }
+                total += current * mult
+                if (total > 36500L * 86400L) return null
+                current = -1L
+                foundAny = true
             }
+            i++
         }
-        return if (foundAny) totalSeconds else null
+
+        if (current >= 0L) return null // رقم من غير وحدة (مثلاً "30")
+        return if (foundAny) total else null
     }
 
     private fun executeTimeout(guildId: Long, userId: Long, durationSeconds: Long?, reason: String) {
         Utils.threadPool.execute {
             try {
-                val isoTimestamp = durationSeconds?.let {
-                    val date = Date(System.currentTimeMillis() + (it * 1000))
-                    val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-                        timeZone = TimeZone.getTimeZone("UTC")
-                    }
-                    sdf.format(date)
+                var isoTimestamp: String? = null
+                if (durationSeconds != null) {
+                    val date = Date(System.currentTimeMillis() + (durationSeconds * 1000L))
+                    val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+                    sdf.timeZone = TimeZone.getTimeZone("UTC")
+                    isoTimestamp = sdf.format(date)
                 }
 
-                val payload = JSONObject().apply {
-                    put("communication_disabled_until", if (isoTimestamp != null) isoTimestamp else JSONObject.NULL)
-                }
+                val payload = JSONObject()
+                payload.put("communication_disabled_until", isoTimestamp ?: JSONObject.NULL)
 
                 val req = Http.Request.newDiscordRequest("/guilds/$guildId/members/$userId", "PATCH")
                     .setHeader("Content-Type", "application/json")
-                if (reason.isNotBlank()) {
+                if (!isBlankSafe(reason)) {
                     req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
                 }
 
@@ -408,12 +455,11 @@ class ModernModActions : Plugin() {
             .setTitle("Ban Member")
             .setView(layout)
             .setPositiveButton("Ban") { _, _ ->
-                val reason = reasonInput.text.toString().trim()
-                val deleteSeconds = secondsMap[spinner.selectedItemPosition]
-                val summary = buildString {
-                    append("Delete messages: ").append(options[spinner.selectedItemPosition])
-                    append("\nReason: ").append(if (reason.isBlank()) "(none)" else reason)
-                }
+                val reason = trimSafe(reasonInput.text.toString())
+                val pos = spinner.selectedItemPosition
+                val deleteSeconds = secondsMap[pos]
+                val summary = "Delete messages: " + options[pos] +
+                    "\nReason: " + (if (isBlankSafe(reason)) "(none)" else reason)
                 confirmAction(context, "Confirm Ban", summary) {
                     executeBan(guildId, userId, deleteSeconds, reason)
                 }
@@ -425,13 +471,12 @@ class ModernModActions : Plugin() {
     private fun executeBan(guildId: Long, userId: Long, deleteSeconds: Long, reason: String) {
         Utils.threadPool.execute {
             try {
-                val payload = JSONObject().apply {
-                    put("delete_message_seconds", deleteSeconds)
-                }
+                val payload = JSONObject()
+                payload.put("delete_message_seconds", deleteSeconds)
 
                 val req = Http.Request.newDiscordRequest("/guilds/$guildId/bans/$userId", "PUT")
                     .setHeader("Content-Type", "application/json")
-                if (reason.isNotBlank()) {
+                if (!isBlankSafe(reason)) {
                     req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
                 }
 
@@ -461,8 +506,8 @@ class ModernModActions : Plugin() {
             .setTitle("Kick Member")
             .setView(input)
             .setPositiveButton("Kick") { _, _ ->
-                val reason = input.text.toString().trim()
-                val summary = if (reason.isBlank()) "No reason provided." else "Reason: $reason"
+                val reason = trimSafe(input.text.toString())
+                val summary = if (isBlankSafe(reason)) "No reason provided." else "Reason: $reason"
                 confirmAction(context, "Confirm Kick", summary) {
                     executeKick(guildId, userId, reason)
                 }
@@ -475,7 +520,7 @@ class ModernModActions : Plugin() {
         Utils.threadPool.execute {
             try {
                 val req = Http.Request.newDiscordRequest("/guilds/$guildId/members/$userId", "DELETE")
-                if (reason.isNotBlank()) {
+                if (!isBlankSafe(reason)) {
                     req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
                 }
 
