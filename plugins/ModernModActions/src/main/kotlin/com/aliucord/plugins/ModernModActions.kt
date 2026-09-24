@@ -32,65 +32,145 @@ class ModernModActions : Plugin() {
     }
 
     override fun start(context: Context) {
-        try {
-            patcher.patch(
-                UserProfileAdminView::class.java,
-                "updateView",
-                arrayOf(UserProfileAdminView.ViewState::class.java),
-                Hook { frame ->
-                    val adminView = frame.thisObject as UserProfileAdminView
-
-                    val selectedGuildId = StoreStream.getGuildSelected().selectedGuildId
-
-                    val sheet = Utils.appActivity.supportFragmentManager.fragments
-                        .filterIsInstance<WidgetUserSheet>()
-                        .firstOrNull { it.isVisible }
-
-                    val args = sheet?.arguments
-                    val userId = args?.getLong("ARG_USER_ID") ?: 0L
-                    val guildId = (args?.getLong("ARG_GUILD_ID")?.takeIf { it != 0L }) ?: selectedGuildId
-
-                    if (userId == 0L || guildId == 0L) return@Hook
-
-                    // 1. زر التايم أوت — يظهر بس لو معاك صلاحية Timeout Members (أو Administrator)
-                    if (hasPermission(guildId, Perm.MODERATE_MEMBERS)) {
-                        bindClick(adminView, "user_profile_admin_disable_communication") {
-                            showTimeoutDialog(adminView.context, guildId, userId)
-                        }
-                    } else {
-                        hideView(adminView, "user_profile_admin_disable_communication")
-                    }
-
-                    // 2. زر الباند — يظهر بس لو معاك صلاحية Ban Members (أو Administrator)
-                    if (hasPermission(guildId, Perm.BAN_MEMBERS)) {
-                        bindClick(adminView, "user_profile_admin_ban") {
-                            showBanDialog(adminView.context, guildId, userId)
-                        }
-                    } else {
-                        hideView(adminView, "user_profile_admin_ban")
-                    }
-
-                    // 3. زر الكيك — يظهر بس لو معاك صلاحية Kick Members (أو Administrator)
-                    if (hasPermission(guildId, Perm.KICK_MEMBERS)) {
-                        bindClick(adminView, "user_profile_admin_kick") {
-                            showKickDialog(adminView.context, guildId, userId)
-                        }
-                    } else {
-                        hideView(adminView, "user_profile_admin_kick")
-                    }
-                }
-            )
-        } catch (e: Throwable) {
-            logger.error("Failed to patch UserProfileAdminView", e)
+        patchVisibility()
+        patchClick("setOnBan", "user_profile_admin_ban", Perm.BAN_MEMBERS) { ctx, guildId, userId ->
+            showBanDialog(ctx, guildId, userId)
         }
+        patchClick("setOnKick", "user_profile_admin_kick", Perm.KICK_MEMBERS) { ctx, guildId, userId ->
+            showKickDialog(ctx, guildId, userId)
+        }
+        patchClick(
+            "setOnDisableCommunication",
+            "user_profile_admin_disable_communication",
+            Perm.MODERATE_MEMBERS
+        ) { ctx, guildId, userId ->
+            showTimeoutDialog(ctx, guildId, userId)
+        }
+    }
+
+    /**
+     * updateView(ViewState) only ever touches visibility/text/icons — it never sets a click
+     * listener. We patch it purely to ADD an extra hide when this account lacks the relevant
+     * permission; we never force a button VISIBLE here, since Discord's own ViewState already
+     * encodes other reasons to hide it (e.g. you can't ban/kick/timeout yourself).
+     */
+    private fun patchVisibility() {
+        val methods = UserProfileAdminView::class.java.declaredMethods.filter { it.name == "updateView" }
+        if (methods.isEmpty()) {
+            Utils.showToast(
+                "ModernModActions: could NOT find updateView on UserProfileAdminView. " +
+                    "Discord's class layout changed; this plugin needs an update."
+            )
+            return
+        }
+        for (method in methods) {
+            try {
+                patcher.patch(method, Hook { frame ->
+                    try {
+                        val adminView = frame.thisObject as? UserProfileAdminView ?: return@Hook
+                        val guildId = currentGuildId()
+                        if (guildId == 0L) return@Hook
+                        hideIfMissing(adminView, "user_profile_admin_ban", guildId, Perm.BAN_MEMBERS)
+                        hideIfMissing(adminView, "user_profile_admin_kick", guildId, Perm.KICK_MEMBERS)
+                        hideIfMissing(
+                            adminView,
+                            "user_profile_admin_disable_communication",
+                            guildId,
+                            Perm.MODERATE_MEMBERS
+                        )
+                    } catch (e: Throwable) {
+                        logger.error("ModernModActions: visibility hook crashed", e)
+                    }
+                })
+                logger.info("ModernModActions: patched updateView for permission-based hiding")
+            } catch (e: Throwable) {
+                logger.error("ModernModActions: failed to patch updateView", e)
+            }
+        }
+    }
+
+    private fun hideIfMissing(root: View, resourceName: String, guildId: Long, permission: Long) {
+        if (hasPermission(guildId, permission)) return // leave Discord's own decision alone
+        val resId = Utils.getResId(resourceName, "id")
+        if (resId == 0) return
+        root.findViewById<View>(resId)?.visibility = View.GONE
+    }
+
+    /**
+     * The real click wiring happens in these setters (setOnBan/setOnKick/setOnDisableCommunication),
+     * NOT in updateView. Discord calls the matching setter with its own lambda, which opens the
+     * native dialog. We patch the setter itself and re-assign our own click listener straight
+     * after the original runs, so we always have the final word on that button's click listener
+     * no matter when Discord calls it relative to updateView.
+     */
+    private fun patchClick(
+        setterName: String,
+        resourceName: String,
+        permission: Long,
+        showDialog: (Context, Long, Long) -> Unit
+    ) {
+        val method = UserProfileAdminView::class.java.declaredMethods.firstOrNull { it.name == setterName }
+        if (method == null) {
+            logger.error("ModernModActions: setter '$setterName' not found on UserProfileAdminView")
+            Utils.showToast("ModernModActions: '$setterName' not found, this plugin needs an update.")
+            return
+        }
+        try {
+            patcher.patch(method, Hook { frame ->
+                try {
+                    val adminView = frame.thisObject as? UserProfileAdminView ?: return@Hook
+                    val resId = Utils.getResId(resourceName, "id")
+                    if (resId == 0) {
+                        logger.error("ModernModActions: no resource id '$resourceName'")
+                        return@Hook
+                    }
+                    val view = adminView.findViewById<View>(resId)
+                    if (view == null) {
+                        logger.error("ModernModActions: findViewById('$resourceName') returned null")
+                        return@Hook
+                    }
+                    view.setOnClickListener {
+                        val guildId = currentGuildId()
+                        val userId = currentUserId()
+                        if (guildId == 0L || userId == 0L) {
+                            Utils.showToast("ModernModActions: couldn't identify this member, try reopening the profile.")
+                            return@setOnClickListener
+                        }
+                        if (!hasPermission(guildId, permission)) {
+                            Utils.showToast("You don't have permission to do that here.")
+                            return@setOnClickListener
+                        }
+                        showDialog(adminView.context, guildId, userId)
+                    }
+                    logger.info("ModernModActions: re-wired click for $resourceName via $setterName")
+                } catch (e: Throwable) {
+                    logger.error("ModernModActions: click hook for $setterName crashed", e)
+                }
+            })
+            logger.info("ModernModActions: patched $setterName")
+        } catch (e: Throwable) {
+            logger.error("ModernModActions: failed to patch $setterName", e)
+        }
+    }
+
+    private fun currentUserSheet(): WidgetUserSheet? = Utils.appActivity.supportFragmentManager.fragments
+        .filterIsInstance<WidgetUserSheet>()
+        .firstOrNull { it.isVisible }
+
+    private fun currentUserId(): Long = currentUserSheet()?.arguments?.getLong("ARG_USER_ID") ?: 0L
+
+    private fun currentGuildId(): Long {
+        val selectedGuildId = StoreStream.getGuildSelected().selectedGuildId
+        val fromArgs = currentUserSheet()?.arguments?.getLong("ARG_GUILD_ID")?.takeIf { it != 0L }
+        return fromArgs ?: selectedGuildId
     }
 
     /**
      * Reads this account's computed permissions in [guildId] from Discord's own permission
      * store, exactly what QuestUI-style plugins use. If the store can't be read for any
-     * reason we "fail open" (show the button) since Discord's API will still reject the
-     * request with HTTP 403 if the permission is genuinely missing — nothing unsafe happens,
-     * we just lose the cosmetic hiding for that one case.
+     * reason we "fail open" (allow) since Discord's API will still reject the request with
+     * HTTP 403 if the permission is genuinely missing — nothing unsafe happens, we just lose
+     * the cosmetic hiding/blocking for that one case.
      */
     private fun currentGuildPermissions(guildId: Long): Long? = try {
         StoreStream.getPermissions().getGuildPermissions()[guildId]
@@ -102,20 +182,6 @@ class ModernModActions : Plugin() {
     private fun hasPermission(guildId: Long, flag: Long): Boolean {
         val perms = currentGuildPermissions(guildId) ?: return true // unknown -> fail open
         return (perms and flag) != 0L || (perms and Perm.ADMINISTRATOR) != 0L
-    }
-
-    private fun bindClick(root: View, resourceName: String, onClick: () -> Unit) {
-        val resId = Utils.getResId(resourceName, "id")
-        if (resId == 0) return
-        val view = root.findViewById<View>(resId) ?: return
-        view.visibility = View.VISIBLE
-        view.setOnClickListener { onClick() }
-    }
-
-    private fun hideView(root: View, resourceName: String) {
-        val resId = Utils.getResId(resourceName, "id")
-        if (resId == 0) return
-        root.findViewById<View>(resId)?.visibility = View.GONE
     }
 
     /** A second "are you sure?" step so a stray tap never fires a moderation action by itself. */
