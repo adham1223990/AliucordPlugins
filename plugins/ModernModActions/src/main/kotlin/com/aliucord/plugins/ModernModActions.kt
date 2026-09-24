@@ -23,6 +23,14 @@ import java.util.regex.Pattern
 @AliucordPlugin(requiresRestart = false)
 class ModernModActions : Plugin() {
 
+    // Official Discord permission bit flags (guild-level), from Discord's own API docs.
+    private object Perm {
+        const val KICK_MEMBERS = 0x2L
+        const val BAN_MEMBERS = 0x4L
+        const val ADMINISTRATOR = 0x8L
+        const val MODERATE_MEMBERS = 1L shl 40 // Timeout Members
+    }
+
     override fun start(context: Context) {
         try {
             patcher.patch(
@@ -44,19 +52,31 @@ class ModernModActions : Plugin() {
 
                     if (userId == 0L || guildId == 0L) return@Hook
 
-                    // 1. زر التايم أوت الحديث
-                    bindClick(adminView, "user_profile_admin_disable_communication") {
-                        showTimeoutDialog(adminView.context, guildId, userId)
+                    // 1. زر التايم أوت — يظهر بس لو معاك صلاحية Timeout Members (أو Administrator)
+                    if (hasPermission(guildId, Perm.MODERATE_MEMBERS)) {
+                        bindClick(adminView, "user_profile_admin_disable_communication") {
+                            showTimeoutDialog(adminView.context, guildId, userId)
+                        }
+                    } else {
+                        hideView(adminView, "user_profile_admin_disable_communication")
                     }
 
-                    // 2. زر الباند الحديث
-                    bindClick(adminView, "user_profile_admin_ban") {
-                        showBanDialog(adminView.context, guildId, userId)
+                    // 2. زر الباند — يظهر بس لو معاك صلاحية Ban Members (أو Administrator)
+                    if (hasPermission(guildId, Perm.BAN_MEMBERS)) {
+                        bindClick(adminView, "user_profile_admin_ban") {
+                            showBanDialog(adminView.context, guildId, userId)
+                        }
+                    } else {
+                        hideView(adminView, "user_profile_admin_ban")
                     }
 
-                    // 3. زر الكيك الحديث
-                    bindClick(adminView, "user_profile_admin_kick") {
-                        showKickDialog(adminView.context, guildId, userId)
+                    // 3. زر الكيك — يظهر بس لو معاك صلاحية Kick Members (أو Administrator)
+                    if (hasPermission(guildId, Perm.KICK_MEMBERS)) {
+                        bindClick(adminView, "user_profile_admin_kick") {
+                            showKickDialog(adminView.context, guildId, userId)
+                        }
+                    } else {
+                        hideView(adminView, "user_profile_admin_kick")
                     }
                 }
             )
@@ -65,12 +85,47 @@ class ModernModActions : Plugin() {
         }
     }
 
+    /**
+     * Reads this account's computed permissions in [guildId] from Discord's own permission
+     * store, exactly what QuestUI-style plugins use. If the store can't be read for any
+     * reason we "fail open" (show the button) since Discord's API will still reject the
+     * request with HTTP 403 if the permission is genuinely missing — nothing unsafe happens,
+     * we just lose the cosmetic hiding for that one case.
+     */
+    private fun currentGuildPermissions(guildId: Long): Long? = try {
+        StoreStream.getPermissions().getGuildPermissions()[guildId]
+    } catch (e: Throwable) {
+        logger.error("Failed to read guild permissions for $guildId", e)
+        null
+    }
+
+    private fun hasPermission(guildId: Long, flag: Long): Boolean {
+        val perms = currentGuildPermissions(guildId) ?: return true // unknown -> fail open
+        return (perms and flag) != 0L || (perms and Perm.ADMINISTRATOR) != 0L
+    }
+
     private fun bindClick(root: View, resourceName: String, onClick: () -> Unit) {
         val resId = Utils.getResId(resourceName, "id")
         if (resId == 0) return
         val view = root.findViewById<View>(resId) ?: return
         view.visibility = View.VISIBLE
         view.setOnClickListener { onClick() }
+    }
+
+    private fun hideView(root: View, resourceName: String) {
+        val resId = Utils.getResId(resourceName, "id")
+        if (resId == 0) return
+        root.findViewById<View>(resId)?.visibility = View.GONE
+    }
+
+    /** A second "are you sure?" step so a stray tap never fires a moderation action by itself. */
+    private fun confirmAction(context: Context, title: String, summary: String, onConfirm: () -> Unit) {
+        AlertDialog.Builder(context)
+            .setTitle(title)
+            .setMessage(summary)
+            .setPositiveButton("Confirm") { _, _ -> onConfirm() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ==========================================
@@ -118,10 +173,22 @@ class ModernModActions : Plugin() {
                     return@setPositiveButton
                 }
 
-                executeTimeout(guildId, userId, totalSeconds, reason)
+                val summary = buildString {
+                    append("Duration: ").append(durationText)
+                    append("\nReason: ").append(if (reason.isBlank()) "(none)" else reason)
+                }
+                confirmAction(context, "Confirm Timeout", summary) {
+                    executeTimeout(guildId, userId, totalSeconds, reason)
+                }
             }
             .setNeutralButton("Remove Timeout") { _, _ ->
-                executeTimeout(guildId, userId, null, "Removed timeout")
+                confirmAction(
+                    context,
+                    "Remove Timeout?",
+                    "This clears any active timeout for this member."
+                ) {
+                    executeTimeout(guildId, userId, null, "Removed timeout")
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -236,7 +303,13 @@ class ModernModActions : Plugin() {
             .setPositiveButton("Ban") { _, _ ->
                 val reason = reasonInput.text.toString().trim()
                 val deleteSeconds = secondsMap[spinner.selectedItemPosition]
-                executeBan(guildId, userId, deleteSeconds, reason)
+                val summary = buildString {
+                    append("Delete messages: ").append(options[spinner.selectedItemPosition])
+                    append("\nReason: ").append(if (reason.isBlank()) "(none)" else reason)
+                }
+                confirmAction(context, "Confirm Ban", summary) {
+                    executeBan(guildId, userId, deleteSeconds, reason)
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -282,7 +355,10 @@ class ModernModActions : Plugin() {
             .setView(input)
             .setPositiveButton("Kick") { _, _ ->
                 val reason = input.text.toString().trim()
-                executeKick(guildId, userId, reason)
+                val summary = if (reason.isBlank()) "No reason provided." else "Reason: $reason"
+                confirmAction(context, "Confirm Kick", summary) {
+                    executeKick(guildId, userId, reason)
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -314,3 +390,4 @@ class ModernModActions : Plugin() {
         patcher.unpatchAll()
     }
 }
+
