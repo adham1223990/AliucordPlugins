@@ -111,7 +111,7 @@ class ModernModActions : Plugin() {
     ) {
         val method = UserProfileAdminView::class.java.declaredMethods.firstOrNull { it.name == setterName }
         if (method == null) {
-            logger.error("ModernModActions: setter '$setterName' not found on UserProfileAdminView")
+            logger.error("ModernModActions: setter '$setterName' not found on UserProfileAdminView", null)
             Utils.showToast("ModernModActions: '$setterName' not found, this plugin needs an update.")
             return
         }
@@ -121,12 +121,12 @@ class ModernModActions : Plugin() {
                     val adminView = frame.thisObject as? UserProfileAdminView ?: return@Hook
                     val resId = Utils.getResId(resourceName, "id")
                     if (resId == 0) {
-                        logger.error("ModernModActions: no resource id '$resourceName'")
+                        logger.error("ModernModActions: no resource id '$resourceName'", null)
                         return@Hook
                     }
                     val view = adminView.findViewById<View>(resId)
                     if (view == null) {
-                        logger.error("ModernModActions: findViewById('$resourceName') returned null")
+                        logger.error("ModernModActions: findViewById('$resourceName') returned null", null)
                         return@Hook
                     }
                     view.setOnClickListener {
