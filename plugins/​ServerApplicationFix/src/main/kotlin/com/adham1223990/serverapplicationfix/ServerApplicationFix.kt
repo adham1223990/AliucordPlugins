@@ -17,8 +17,8 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
+import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
-import com.aliucord.patcher.after
 import com.aliucord.utils.RNSuperProperties
 
 import com.discord.databinding.WidgetGuildContextMenuBinding
@@ -48,26 +48,37 @@ class ServerApplicationFix : Plugin() {
     private var guildSelectedSubscription: Subscription? = null
 
     override fun start(context: Context) {
-        // 1. حقن الـ Super Properties والـ User-Agent لتخطي تدقيق الـ v10
-        patcher.after<Http.Request>("setHeader", String::class.java, String::class.java) { param ->
-            val request = param.thisObject as Http.Request
-            if (request.conn.url.host != "discord.com") return@after
+        // 1. حقن الـ Super Properties والـ User-Agent
+        try {
+            val setHeaderMethod = Http.Request::class.java.getDeclaredMethod("setHeader", String::class.java, String::class.java)
+            patcher.patch(setHeaderMethod, Hook { param ->
+                val request = param.thisObject as? Http.Request ?: return@Hook
+                if (request.conn.url.host != "discord.com") return@Hook
 
-            when ((param.args[0] as String).lowercase()) {
-                "user-agent" -> request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
-                "x-super-properties" -> request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
-            }
+                val headerKey = (param.args[0] as? String)?.lowercase() ?: return@Hook
+                when (headerKey) {
+                    "user-agent" -> request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
+                    "x-super-properties" -> request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
+                }
+            })
+        } catch (t: Throwable) {
+            logger.error("Failed to patch setHeader", t)
         }
 
-        patcher.after<Http.Request>("newDiscordRNRequest", String::class.java, String::class.java) { param ->
-            val request = param.result as? Http.Request ?: return@after
-            if (request.conn.url.host != "discord.com") return@after
+        try {
+            val newDiscordRNRequestMethod = Http.Request::class.java.getDeclaredMethod("newDiscordRNRequest", String::class.java, String::class.java)
+            patcher.patch(newDiscordRNRequestMethod, Hook { param ->
+                val request = param.result as? Http.Request ?: return@Hook
+                if (request.conn.url.host != "discord.com") return@Hook
 
-            request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
-            request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
+                request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
+                request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
+            })
+        } catch (t: Throwable) {
+            logger.error("Failed to patch newDiscordRNRequest", t)
         }
 
-        // 2. الاعتراض التلقائي الصامت فور اختيار أي سيرفر
+        // 2. الاستماع التلقائي المباشر لتغيير السيرفر
         try {
             guildSelectedSubscription = StoreStream.getGuildSelected()
                 .observeSelectedGuildId()
@@ -77,23 +88,24 @@ class ServerApplicationFix : Plugin() {
 
                     if (checkedGuilds.contains(guildId)) return@subscribe
 
-                    val meId = StoreStream.getUsers().me?.id ?: return@subscribe
-                    val member = StoreStream.getGuilds().getMember(guildIdLong, meId)
+                    val me = StoreStream.getUsers().me ?: return@subscribe
+                    val member = StoreStream.getGuilds().getMember(guildIdLong, me.id)
 
-                    if (member == null || member.isPending) {
+                    // إذا كان العضو جديداً أو لم يأخذ أي رتب بعد يتم الفحص
+                    if (member == null || member.roles.isEmpty()) {
                         checkAndTriggerApplication(guildId, isAuto = true)
                     }
-                }, { error ->
+                }, { error: Throwable ->
                     logger.error("Error observing selected guild", error)
                 })
         } catch (e: Exception) {
             logger.error("Failed to subscribe to observeSelectedGuildId", e)
         }
 
-        // 3. خيار الـ Context Menu اليدوي للاحتياط
+        // 3. خيار الـ Context Menu اليدوي للسيرفر
         val viewId = View.generateViewId()
-        val verifyIcon = ContextCompat.getDrawable(Utils.appActivity, R.e.ic_verified_badge_24dp)?.mutate()
-            ?: ContextCompat.getDrawable(Utils.appActivity, R.e.ic_shield_24dp)?.mutate()
+        val verifyIcon = ContextCompat.getDrawable(Utils.appActivity, R.e.ic_rule_24dp)?.mutate()
+            ?: ContextCompat.getDrawable(Utils.appActivity, R.e.ic_audit_log_white_24dp)?.mutate()
         Utils.tintToTheme(verifyIcon)
 
         val getServerBindingMethod by lazy {
@@ -128,7 +140,7 @@ class ServerApplicationFix : Plugin() {
             } catch (ignored: Exception) {}
         })
 
-        // 4. أمر شات يدوي
+        // 4. أمر الشات اليدوي
         commands.registerCommand(
             "apply-verify",
             "Open Server Verification / Application Form",
@@ -183,7 +195,7 @@ class ServerApplicationFix : Plugin() {
                 req.setHeader("X-Super-Properties", getSuperProperties())
                 
                 val response = req.execute()
-                if (!response.ok) {
+                if (!response.ok()) {
                     if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
                     return@thread
                 }
@@ -226,11 +238,12 @@ class ServerApplicationFix : Plugin() {
                 req.setHeader("X-Super-Properties", getSuperProperties())
 
                 val res = req.executeWithBody(body.toString())
-                if (res.ok) {
+                if (res.ok()) {
                     checkedGuilds.remove(guildId)
                     onComplete(true, null)
                 } else {
-                    onComplete(false, "Server response code: ${res.responseCode}")
+                    val code = res.conn.responseCode
+                    onComplete(false, "Server response code: $code")
                 }
             } catch (e: Exception) {
                 logger.error("Error submitting application", e)
