@@ -1,0 +1,241 @@
+package com.adham1223990.serverapplicationfix
+
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.os.Handler
+import android.os.Looper
+import android.util.Base64
+import android.view.View
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.core.content.ContextCompat
+
+import com.aliucord.Http
+import com.aliucord.Logger
+import com.aliucord.Utils
+import com.aliucord.annotations.AliucordPlugin
+import com.aliucord.api.CommandsAPI
+import com.aliucord.entities.Plugin
+import com.aliucord.patcher.PreHook
+import com.aliucord.patcher.after
+import com.aliucord.utils.RNSuperProperties
+
+import com.discord.databinding.WidgetGuildContextMenuBinding
+import com.discord.stores.StoreStream
+import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
+import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
+
+import com.lytefast.flexinput.R
+import org.json.JSONArray
+import org.json.JSONObject
+import rx.Subscription
+import kotlin.concurrent.thread
+
+@AliucordPlugin(requiresRestart = false)
+@Suppress("unused")
+class ServerApplicationFix : Plugin() {
+
+    companion object {
+        const val CURRENT_RN_BUILD_NUMBER = 6081
+        const val CURRENT_RN_VERSION_CODE = 341200
+        const val CURRENT_RN_VERSION = "341.0 - rn"
+        const val CURRENT_RN_USER_AGENT = "Discord-Android/$CURRENT_RN_VERSION_CODE;RNA"
+    }
+
+    private var cachedSuperProps: String? = null
+    private val checkedGuilds = HashSet<String>()
+    private var guildSelectedSubscription: Subscription? = null
+
+    override fun start(context: Context) {
+        // 1. حقن الـ Super Properties والـ User-Agent لتخطي تدقيق الـ v10
+        patcher.after<Http.Request>("setHeader", String::class.java, String::class.java) { param ->
+            val request = param.thisObject as Http.Request
+            if (request.conn.url.host != "discord.com") return@after
+
+            when ((param.args[0] as String).lowercase()) {
+                "user-agent" -> request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
+                "x-super-properties" -> request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
+            }
+        }
+
+        patcher.after<Http.Request>("newDiscordRNRequest", String::class.java, String::class.java) { param ->
+            val request = param.result as? Http.Request ?: return@after
+            if (request.conn.url.host != "discord.com") return@after
+
+            request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
+            request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
+        }
+
+        // 2. الاعتراض التلقائي الصامت فور اختيار أي سيرفر
+        try {
+            guildSelectedSubscription = StoreStream.getGuildSelected()
+                .observeSelectedGuildId()
+                .subscribe({ guildIdLong ->
+                    if (guildIdLong == null || guildIdLong == 0L) return@subscribe
+                    val guildId = guildIdLong.toString()
+
+                    if (checkedGuilds.contains(guildId)) return@subscribe
+
+                    val meId = StoreStream.getUsers().me?.id ?: return@subscribe
+                    val member = StoreStream.getGuilds().getMember(guildIdLong, meId)
+
+                    if (member == null || member.isPending) {
+                        checkAndTriggerApplication(guildId, isAuto = true)
+                    }
+                }, { error ->
+                    logger.error("Error observing selected guild", error)
+                })
+        } catch (e: Exception) {
+            logger.error("Failed to subscribe to observeSelectedGuildId", e)
+        }
+
+        // 3. خيار الـ Context Menu اليدوي للاحتياط
+        val viewId = View.generateViewId()
+        val verifyIcon = ContextCompat.getDrawable(Utils.appActivity, R.e.ic_verified_badge_24dp)?.mutate()
+            ?: ContextCompat.getDrawable(Utils.appActivity, R.e.ic_shield_24dp)?.mutate()
+        Utils.tintToTheme(verifyIcon)
+
+        val getServerBindingMethod by lazy {
+            WidgetGuildContextMenu::class.java.getDeclaredMethod("getBinding").apply { isAccessible = true }
+        }
+        val gcmvm_cfg = WidgetGuildContextMenu::class.java.getDeclaredMethod(
+            "configureUI", 
+            GuildContextMenuViewModel.ViewState::class.java
+        )
+
+        patcher.patch(gcmvm_cfg, PreHook { param ->
+            try {
+                val validState = param.args[0] as GuildContextMenuViewModel.ViewState.Valid
+                val binding = getServerBindingMethod.invoke(param.thisObject) as WidgetGuildContextMenuBinding
+                val lay = binding.e.parent as LinearLayout
+
+                lay.removeView(lay.findViewById(viewId))
+                if (lay.findViewById<View>(viewId) == null) {
+                    val tw = TextView(lay.context, null, 0, R.i.ContextMenuTextOption).apply {
+                        id = viewId
+                        text = "Member Verification"
+                        setCompoundDrawablesRelativeWithIntrinsicBounds(verifyIcon, null, null, null)
+                    }
+                    lay.addView(tw)
+
+                    tw.setOnClickListener { v ->
+                        lay.visibility = View.GONE
+                        val guildId = validState.guild.id.toString()
+                        checkAndTriggerApplication(guildId, isAuto = false)
+                    }
+                }
+            } catch (ignored: Exception) {}
+        })
+
+        // 4. أمر شات يدوي
+        commands.registerCommand(
+            "apply-verify",
+            "Open Server Verification / Application Form",
+            listOf()
+        ) { ctx ->
+            val guildId = StoreStream.getGuildSelected().selectedGuildId.toString()
+            if (guildId == "0") {
+                return@registerCommand CommandsAPI.CommandResult("You are not currently in a server!", null, false)
+            }
+            checkAndTriggerApplication(guildId, isAuto = false)
+            CommandsAPI.CommandResult("Checking application...", null, false)
+        }
+    }
+
+    override fun stop(context: Context) {
+        patcher.unpatchAll()
+        guildSelectedSubscription?.unsubscribe()
+        guildSelectedSubscription = null
+        checkedGuilds.clear()
+    }
+
+    private fun getSafeActivity(): Activity {
+        return Utils.appActivity
+    }
+
+    private fun getSuperProperties(): String {
+        cachedSuperProps?.let { return it }
+        val props = try {
+            JSONObject(RNSuperProperties.superProperties.toString())
+        } catch (t: Throwable) {
+            JSONObject()
+        }
+
+        props.put("has_client_mods", false)
+        props.put("os", "Android")
+        props.put("browser", "Discord Android")
+        props.put("client_version", CURRENT_RN_VERSION)
+        props.put("release_channel", "canaryRelease")
+        props.put("client_build_number", CURRENT_RN_BUILD_NUMBER)
+        props.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
+
+        val encoded = Base64.encodeToString(props.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        cachedSuperProps = encoded
+        return encoded
+    }
+
+    fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
+        thread {
+            try {
+                val req = Http.Request.newDiscordRequest("/guilds/$guildId/member-verification?with_guild=true", "GET")
+                req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
+                req.setHeader("X-Super-Properties", getSuperProperties())
+                
+                val response = req.execute()
+                if (!response.ok) {
+                    if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
+                    return@thread
+                }
+
+                val root = JSONObject(response.text())
+                val formFields = root.optJSONArray("form_fields") ?: JSONArray()
+                val description = root.optString("description", "")
+
+                if (formFields.length() == 0) {
+                    if (!isAuto) Utils.showToast("No active application for this server.", false)
+                    return@thread
+                }
+
+                checkedGuilds.add(guildId)
+
+                Handler(Looper.getMainLooper()).post {
+                    val activity = getSafeActivity()
+                    val page = ApplicationPage(this, guildId, description, formFields)
+                    Utils.openPageWithProxy(activity, page)
+                }
+            } catch (e: Exception) {
+                logger.error("Auto check error for guild $guildId", e)
+                if (!isAuto) {
+                    Utils.showToast("Failed to check: ${e.message}", false)
+                }
+            }
+        }
+    }
+
+    fun submitForm(guildId: String, formPayload: JSONArray, onComplete: (Boolean, String?) -> Unit) {
+        thread {
+            try {
+                val body = JSONObject().apply {
+                    put("form_fields", formPayload)
+                }
+
+                val req = Http.Request.newDiscordRequest("/guilds/$guildId/requests/@me", "PUT")
+                req.setHeader("Content-Type", "application/json")
+                req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
+                req.setHeader("X-Super-Properties", getSuperProperties())
+
+                val res = req.executeWithBody(body.toString())
+                if (res.ok) {
+                    checkedGuilds.remove(guildId)
+                    onComplete(true, null)
+                } else {
+                    onComplete(false, "Server response code: ${res.responseCode}")
+                }
+            } catch (e: Exception) {
+                logger.error("Error submitting application", e)
+                onComplete(false, e.message)
+            }
+        }
+    }
+}
