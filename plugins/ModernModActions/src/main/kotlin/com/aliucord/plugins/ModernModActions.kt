@@ -26,7 +26,6 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -208,6 +207,52 @@ class ModernModActions : Plugin() {
         return result
     }
 
+    /**
+     * بديل صحيح لـ URLEncoder: بيرمّز المسافة كـ %20 مش +، زي encodeURIComponent في
+     * الجافاسكريبت اللي عميل ديسكورد الرسمي بيستخدمه لهيدر X-Audit-Log-Reason. استخدام
+     * URLEncoder.encode العادي بيرمّز المسافة كـ '+' (ترميز فورم)، وده مش بيتفكك من
+     * السيرفر في سياق الهيدر، فبيظهر السبب فيه '+' حرفية بدل المسافات.
+     */
+    private fun encodeHeaderValue(s: String): String {
+        val sb = StringBuilder()
+        val bytes = s.toByteArray(Charsets.UTF_8)
+        var i = 0
+        while (i < bytes.size) {
+            val b = bytes[i].toInt() and 0xFF
+            val c = b.toChar()
+            val isUnreserved = (c in 'A'..'Z') || (c in 'a'..'z') || (c in '0'..'9') ||
+                c == '-' || c == '_' || c == '.' || c == '~'
+            if (isUnreserved) {
+                sb.append(c)
+            } else {
+                sb.append('%')
+                val hex = Integer.toHexString(b).uppercase(Locale.ROOT)
+                if (hex.length < 2) sb.append('0')
+                sb.append(hex)
+            }
+            i++
+        }
+        return sb.toString()
+    }
+
+    /**
+     * بيجيب الـ View.OnClickListener اللي ديسكورد فعلاً حطه على الزرار (بعد ما دالة
+     * setOnKick/setOnBan/setOnDisableCommunication الأصلية تخلص تنفيذها)، عشان نقدر
+     * نرجّعله للتنفيذ لو مكناش في بروفايل سيرفر حقيقي (زي Group DM "Remove from group").
+     */
+    private fun getOriginalOnClickListener(view: View): View.OnClickListener? {
+        return try {
+            val liField = View::class.java.getDeclaredField("mListenerInfo")
+            liField.isAccessible = true
+            val li = liField.get(view) ?: return null
+            val ocField = li.javaClass.getDeclaredField("mOnClickListener")
+            ocField.isAccessible = true
+            ocField.get(li) as? View.OnClickListener
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
     // ==========================================================
     // v10 request & spoofing
     // ==========================================================
@@ -358,8 +403,10 @@ class ModernModActions : Plugin() {
                     if (resId == 0) return@Hook
                     val view = adminView.findViewById<View>(resId) ?: return@Hook
 
-                    // حفظ الـ listener الأصلي لديسكورد
-                    val originalListener = frame.args.getOrNull(0) as? View.OnClickListener
+                    // بنحتفظ باللستنر الأصلي بتاع ديسكورد (اللي فعلاً اتحط على الـ View
+                    // بعد ما الدالة الأصلية setOnKick/setOnBan/... خلصت تنفيذها)، عشان لو
+                    // مكناش في بروفايل سيرفر حقيقي (Group DM مثلاً) نرجّع له التنفيذ عادي.
+                    val originalListener = getOriginalOnClickListener(view)
 
                     view.setOnClickListener { v ->
                         val guildId = currentGuildId()
@@ -367,7 +414,11 @@ class ModernModActions : Plugin() {
 
                         // لو الإجراء خارج سيرفر (زي قروب أو DM)، استدعِ كود ديسكورد الأصلي فوراً
                         if (guildId <= 0L || userId <= 0L) {
-                            originalListener?.onClick(v)
+                            if (originalListener != null) {
+                                originalListener.onClick(v)
+                            } else {
+                                Utils.showToast("ModernModActions: couldn't identify this member, try reopening the profile.")
+                            }
                             return@setOnClickListener
                         }
 
@@ -604,7 +655,7 @@ class ModernModActions : Plugin() {
                 val req = createV10Request("/guilds/$guildId/members/$userId", "PATCH")
                     .setHeader("Content-Type", "application/json")
                 if (!isBlankSafe(reason)) {
-                    req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
+                    req.setHeader("X-Audit-Log-Reason", encodeHeaderValue(reason))
                 }
 
                 val res = req.executeWithBody(payload.toString())
@@ -701,7 +752,7 @@ class ModernModActions : Plugin() {
                 val req = createV10Request("/guilds/$guildId/bans/$userId", "PUT")
                     .setHeader("Content-Type", "application/json")
                 if (!isBlankSafe(reason)) {
-                    req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
+                    req.setHeader("X-Audit-Log-Reason", encodeHeaderValue(reason))
                 }
 
                 val res = req.executeWithBody(payload.toString())
@@ -755,7 +806,7 @@ class ModernModActions : Plugin() {
             try {
                 val req = createV10Request("/guilds/$guildId/members/$userId", "DELETE")
                 if (!isBlankSafe(reason)) {
-                    req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
+                    req.setHeader("X-Audit-Log-Reason", encodeHeaderValue(reason))
                 }
 
                 val res = req.execute()
