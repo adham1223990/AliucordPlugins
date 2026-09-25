@@ -199,12 +199,16 @@ class ServerApplicationFix : Plugin() {
     fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
         thread {
             try {
-                val req = Http.Request.newDiscordRequest("/guilds/$guildId/member-verification?with_guild=true", "GET")
+                val req = Http.Request.newDiscordRNRequest("/guilds/$guildId/member-verification?with_guild=true", "GET")
                 req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
                 req.setHeader("X-Super-Properties", getSuperProperties())
 
                 val response = req.execute()
                 if (!response.ok()) {
+                    logger.error(
+                        "member-verification check failed for guild $guildId: HTTP ${response.statusCode}",
+                        null
+                    )
                     if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
                     return@thread
                 }
@@ -241,7 +245,7 @@ class ServerApplicationFix : Plugin() {
                     put("form_fields", formPayload)
                 }
 
-                val req = Http.Request.newDiscordRequest("/guilds/$guildId/requests/@me", "PUT")
+                val req = Http.Request.newDiscordRNRequest("/guilds/$guildId/requests/@me", "PUT")
                 req.setHeader("Content-Type", "application/json")
                 req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
                 req.setHeader("X-Super-Properties", getSuperProperties())
