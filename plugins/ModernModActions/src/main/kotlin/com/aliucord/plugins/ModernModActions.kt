@@ -17,7 +17,6 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
-import com.aliucord.utils.RNSuperProperties
 import com.discord.stores.StoreStream
 import com.discord.widgets.user.profile.UserProfileAdminView
 import com.discord.widgets.user.usersheet.WidgetUserSheet
@@ -44,10 +43,7 @@ class ModernModActions : Plugin() {
     }
 
     companion object {
-        private const val CURRENT_RN_BUILD_NUMBER = 6081
-        private const val CURRENT_RN_VERSION_CODE = 341200
-        private const val CURRENT_RN_VERSION = "341.0 - rn"
-        private const val CURRENT_RN_USER_AGENT = "Discord-Android/$CURRENT_RN_VERSION_CODE;RNA"
+        private const val CURRENT_RN_USER_AGENT = "Discord-Android/225017;RNA"
 
         // Discord Color Palette
         private const val COLOR_BG_POPUP = 0xFF313338.toInt()
@@ -63,7 +59,7 @@ class ModernModActions : Plugin() {
     private var cachedSuperProperties: String? = null
 
     // ==========================================================
-    // UI Helpers (تصميم يحاكي ديسكورد تماماً)
+    // UI Helpers (مطابقة لديسكورد تماماً)
     // ==========================================================
 
     private fun dpToPx(context: Context, dp: Int): Int {
@@ -88,9 +84,7 @@ class ModernModActions : Plugin() {
         contentView: View,
         confirmBtnText: String,
         confirmBtnColor: Int,
-        onConfirm: () -> Unit,
-        neutralBtnText: String? = null,
-        onNeutral: (() -> Unit)? = null
+        onConfirm: () -> Unit
     ): AlertDialog {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -98,7 +92,6 @@ class ModernModActions : Plugin() {
             setPadding(dpToPx(context, 20), dpToPx(context, 20), dpToPx(context, 20), dpToPx(context, 20))
         }
 
-        // Header Title
         val title = TextView(context).apply {
             text = titleText
             setTextColor(COLOR_TEXT_PRIMARY)
@@ -109,7 +102,6 @@ class ModernModActions : Plugin() {
         root.addView(title)
         root.addView(contentView)
 
-        // Buttons Bar
         val btnBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
@@ -128,22 +120,6 @@ class ModernModActions : Plugin() {
             setOnClickListener { dialog?.dismiss() }
         }
         btnBar.addView(cancelBtn)
-
-        if (neutralBtnText != null && onNeutral != null) {
-            val neutralBtn = TextView(context).apply {
-                text = neutralBtnText
-                setTextColor(COLOR_DANGER)
-                textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                setPadding(dpToPx(context, 12), dpToPx(context, 10), dpToPx(context, 12), dpToPx(context, 10))
-                setOnClickListener {
-                    dialog?.dismiss()
-                    onNeutral()
-                }
-            }
-            btnBar.addView(neutralBtn)
-        }
 
         val confirmBtn = TextView(context).apply {
             text = confirmBtnText
@@ -187,7 +163,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================================
-    // Safe string helpers
+    // Safe Helpers
     // ==========================================================
 
     private fun isBlankSafe(s: String?): Boolean {
@@ -244,19 +220,23 @@ class ModernModActions : Plugin() {
     }
 
     private fun buildCurrentSuperProperties(): String {
-        val properties = try {
-            JSONObject(RNSuperProperties.superProperties.toString())
-        } catch (throwable: Throwable) {
-            JSONObject()
+        val properties = JSONObject().apply {
+            put("os", "Android")
+            put("browser", "Discord Android")
+            put("device", android.os.Build.MODEL)
+            put("system_locale", Locale.getDefault().toLanguageTag())
+            put("client_version", "225.17 - rn")
+            put("release_channel", "googleRelease")
+            put("client_build_number", 225017)
+            put("native_build_number", 4320)
+            put("has_client_mods", false)
+            put("os_version", android.os.Build.VERSION.RELEASE)
+            put("os_sdk_version", android.os.Build.VERSION.SDK_INT.toString())
+            put("device_manufacturer", android.os.Build.MANUFACTURER)
+            put("device_model", android.os.Build.MODEL)
+            put("design_id", 0)
+            put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
         }
-
-        properties.put("has_client_mods", false)
-        properties.put("os", "Android")
-        properties.put("browser", "Discord Android")
-        properties.put("client_version", CURRENT_RN_VERSION)
-        properties.put("release_channel", "canaryRelease")
-        properties.put("client_build_number", CURRENT_RN_BUILD_NUMBER)
-        properties.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
         return Base64.encodeToString(properties.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
     }
 
@@ -281,7 +261,7 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================================
-    // Hooks & logic
+    // Hooks & Core Logic
     // ==========================================================
 
     override fun start(context: Context) {
@@ -298,7 +278,7 @@ class ModernModActions : Plugin() {
             "user_profile_admin_disable_communication",
             Perm.MODERATE_MEMBERS
         ) { ctx, guildId, userId ->
-            showTimeoutDialog(ctx, guildId, userId)
+            handleTimeoutClick(ctx, guildId, userId)
         }
     }
 
@@ -312,7 +292,6 @@ class ModernModActions : Plugin() {
                     activeUserId = args.getLong("ARG_USER_ID", 0L)
                     val argGuildId = args.getLong("ARG_GUILD_ID", 0L)
 
-                    // منع التقاط قروبات الـ DMs كـ GuildId
                     activeGuildId = if (argGuildId > 0L) {
                         argGuildId
                     } else {
@@ -336,7 +315,6 @@ class ModernModActions : Plugin() {
                     try {
                         val adminView = frame.thisObject as? UserProfileAdminView ?: return@Hook
                         val guildId = currentGuildId()
-                        // لو مش داخل سيرفر حقيقي (قروب أو DM)، لا تتدخل نهائياً
                         if (guildId <= 0L) return@Hook
 
                         hideIfMissing(adminView, "user_profile_admin_ban", guildId, Perm.BAN_MEMBERS)
@@ -369,7 +347,7 @@ class ModernModActions : Plugin() {
         setterName: String,
         resourceName: String,
         permission: Long,
-        showDialog: (Context, Long, Long) -> Unit
+        onAction: (Context, Long, Long) -> Unit
     ) {
         val method = findMethod(UserProfileAdminView::class.java, setterName) ?: return
         try {
@@ -380,12 +358,16 @@ class ModernModActions : Plugin() {
                     if (resId == 0) return@Hook
                     val view = adminView.findViewById<View>(resId) ?: return@Hook
 
-                    view.setOnClickListener {
+                    // حفظ الـ listener الأصلي لديسكورد
+                    val originalListener = frame.args.getOrNull(0) as? View.OnClickListener
+
+                    view.setOnClickListener { v ->
                         val guildId = currentGuildId()
                         val userId = currentUserId()
 
-                        // إذا كان الإجراء في قروب خاص (Remove from Group) دع ديسكورد يتعامل معه
+                        // لو الإجراء خارج سيرفر (زي قروب أو DM)، استدعِ كود ديسكورد الأصلي فوراً
                         if (guildId <= 0L || userId <= 0L) {
+                            originalListener?.onClick(v)
                             return@setOnClickListener
                         }
 
@@ -393,7 +375,7 @@ class ModernModActions : Plugin() {
                             Utils.showToast("Missing permissions")
                             return@setOnClickListener
                         }
-                        showDialog(adminView.context, guildId, userId)
+                        onAction(adminView.context, guildId, userId)
                     }
                 } catch (e: Throwable) {
                     logger.error("ModernModActions: click hook for $setterName crashed", e)
@@ -419,8 +401,61 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة الـ Timeout الحديثة المطابقة لديسكورد
+    // منطق وواجهة الـ Timeout (فحص ذكي للـ Remove)
     // ==========================================
+
+    private fun isMemberTimedOut(guildId: Long, userId: Long): Boolean {
+        // فحص سريع من الـ Store الداخلي
+        try {
+            val member = StoreStream.getGuilds().getMember(guildId, userId)
+            if (member != null) {
+                // فحص دالة أو حقل communicationDisabledUntil إن وجد
+                val mCls = member.javaClass
+                val getter = findMethod(mCls, "getCommunicationDisabledUntil")
+                    ?: findMethod(mCls, "getCommunicationDisabledUntilTimestamp")
+                if (getter != null) {
+                    val raw = getter.invoke(member)
+                    if (raw is Long && raw > System.currentTimeMillis()) return true
+                    if (raw is String && !isBlankSafe(raw)) return true
+                }
+            }
+        } catch (ignored: Throwable) {
+        }
+
+        // فحص عبر API كخيار احتياطي ومؤكد
+        return try {
+            val res = createV10Request("/guilds/$guildId/members/$userId", "GET").execute()
+            if (res.ok()) {
+                val json = JSONObject(res.text())
+                val until = json.optString("communication_disabled_until", "")
+                if (!isBlankSafe(until) && until != "null") {
+                    val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
+                    sdf.timeZone = TimeZone.getTimeZone("UTC")
+                    val date = sdf.parse(until)
+                    date != null && date.time > System.currentTimeMillis()
+                } else false
+            } else false
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    private fun handleTimeoutClick(context: Context, guildId: Long, userId: Long) {
+        Utils.threadPool.execute {
+            // فحص حالة العضو: هل هو معاقب حالياً؟
+            val timedOut = isMemberTimedOut(guildId, userId)
+            Utils.mainThread.post {
+                if (timedOut) {
+                    // إذا كان عليه تايم آوت، يزيله فوراً بدون حوار
+                    executeTimeout(guildId, userId, null, "Removed timeout")
+                } else {
+                    // إذا لم يكن عليه تايم آوت، يفتح الديالوج
+                    showTimeoutDialog(context, guildId, userId)
+                }
+            }
+        }
+    }
+
     private fun showTimeoutDialog(context: Context, guildId: Long, userId: Long) {
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -448,7 +483,7 @@ class ModernModActions : Plugin() {
                 val durationText = trimSafe(durationInput.text.toString())
                 val reason = trimSafe(reasonInput.text.toString())
 
-                // الشرط: إذا لم تحدد مدة = 7 أيام
+                // لم يتم تحديد مدة = 7 أيام
                 val totalSeconds: Long = if (isBlankSafe(durationText)) {
                     7L * 24L * 3600L
                 } else {
@@ -472,10 +507,6 @@ class ModernModActions : Plugin() {
                 }
 
                 executeTimeout(guildId, userId, totalSeconds, reason)
-            },
-            neutralBtnText = "Remove",
-            onNeutral = {
-                executeTimeout(guildId, userId, null, "Removed timeout")
             }
         )
         dialog.show()
