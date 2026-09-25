@@ -84,6 +84,19 @@ class ModernModActions : Plugin() {
         return result
     }
 
+    private fun getOriginalOnClickListener(view: View): View.OnClickListener? {
+        return try {
+            val liField = View::class.java.getDeclaredField("mListenerInfo")
+            liField.isAccessible = true
+            val li = liField.get(view) ?: return null
+            val ocField = li.javaClass.getDeclaredField("mOnClickListener")
+            ocField.isAccessible = true
+            ocField.get(li) as? View.OnClickListener
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
     // ==========================================================
 
     override fun start(context: Context) {
@@ -203,12 +216,6 @@ class ModernModActions : Plugin() {
             patcher.patch(method, Hook { frame ->
                 try {
                     val adminView = frame.thisObject as? UserProfileAdminView ?: return@Hook
-
-                    // لو مفيش guildId معروف دلوقتي، يبقى احنا في سياق تاني (زي Group DM
-                    // "Remove from group") مش سيرفر فعلي. الزرار ده بيشارك نفس الـ resource id،
-                    // فمنسيبوش لمنطق الطرد بتاعنا ونسيب استماع ديسكورد الأصلي يشتغل عادي.
-                    if (currentGuildId() == 0L) return@Hook
-
                     val resId = Utils.getResId(resourceName, "id")
                     if (resId == 0) {
                         logger.error("ModernModActions: no resource id '$resourceName'", null)
@@ -219,10 +226,23 @@ class ModernModActions : Plugin() {
                         logger.error("ModernModActions: findViewById('$resourceName') returned null", null)
                         return@Hook
                     }
+                    // بنحتفظ باللستنر الأصلي بتاع ديسكورد (اللي بيفتح ديالوجه الافتراضي أو
+                    // بيعمل "Remove from group" في الـ Group DM) عشان نرجعله لو مكناش في
+                    // بروفايل سيرفر فعلي وقت الضغطة.
+                    val originalListener = getOriginalOnClickListener(view)
                     view.setOnClickListener {
                         val guildId = currentGuildId()
                         val userId = currentUserId()
-                        if (guildId == 0L || userId == 0L) {
+                        if (guildId == 0L) {
+                            // مش بروفايل سيرفر (مثلاً Group DM) - سيب ديسكورد يتصرف عادي.
+                            if (originalListener != null) {
+                                originalListener.onClick(it)
+                            } else {
+                                Utils.showToast("ModernModActions: couldn't identify this member, try reopening the profile.")
+                            }
+                            return@setOnClickListener
+                        }
+                        if (userId == 0L) {
                             Utils.showToast("ModernModActions: couldn't identify this member, try reopening the profile.")
                             return@setOnClickListener
                         }
