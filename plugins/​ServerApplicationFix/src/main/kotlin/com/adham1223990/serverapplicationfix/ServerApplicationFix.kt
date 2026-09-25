@@ -78,20 +78,22 @@ class ServerApplicationFix : Plugin() {
             logger.error("Failed to patch newDiscordRNRequest", t)
         }
 
-        // 2. الاستماع التلقائي المباشر لتغيير السيرفر
+        // 2. الاستماع التلقائي المباشر لتغيير السيرفر مع تحديد الأنواع بدقة
         try {
             guildSelectedSubscription = StoreStream.getGuildSelected()
                 .observeSelectedGuildId()
-                .subscribe({ guildIdLong ->
+                .subscribe({ guildIdLong: Long? ->
                     if (guildIdLong == null || guildIdLong == 0L) return@subscribe
                     val guildId = guildIdLong.toString()
 
                     if (checkedGuilds.contains(guildId)) return@subscribe
 
                     val me = StoreStream.getUsers().me ?: return@subscribe
-                    val member = StoreStream.getGuilds().getMember(guildIdLong, me.id)
+                    val meIdLong = me.id.toLong()
+                    val targetGuildIdLong = guildIdLong.toLong()
+                    val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
 
-                    // إذا كان العضو جديداً أو لم يأخذ أي رتب بعد يتم الفحص
+                    // إذا كان العضو بدون رتب أو في حالة معاينة يتم التحقق
                     if (member == null || member.roles.isEmpty()) {
                         checkAndTriggerApplication(guildId, isAuto = true)
                     }
@@ -102,10 +104,10 @@ class ServerApplicationFix : Plugin() {
             logger.error("Failed to subscribe to observeSelectedGuildId", e)
         }
 
-        // 3. خيار الـ Context Menu اليدوي للسيرفر
+        // 3. خيار الـ Context Menu اليدوي للسيرفر بأيقونة مضمونة التواجد
         val viewId = View.generateViewId()
-        val verifyIcon = ContextCompat.getDrawable(Utils.appActivity, R.e.ic_rule_24dp)?.mutate()
-            ?: ContextCompat.getDrawable(Utils.appActivity, R.e.ic_audit_log_white_24dp)?.mutate()
+        val verifyIcon = ContextCompat.getDrawable(Utils.appActivity, R.e.ic_mail_24dp)?.mutate()
+            ?: ContextCompat.getDrawable(Utils.appActivity, android.R.drawable.ic_menu_agenda)?.mutate()
         Utils.tintToTheme(verifyIcon)
 
         val getServerBindingMethod by lazy {
@@ -242,7 +244,7 @@ class ServerApplicationFix : Plugin() {
                     checkedGuilds.remove(guildId)
                     onComplete(true, null)
                 } else {
-                    val code = res.conn.responseCode
+                    val code = res.statusCode
                     onComplete(false, "Server response code: $code")
                 }
             } catch (e: Exception) {
