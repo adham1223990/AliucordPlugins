@@ -3,7 +3,6 @@ package com.aliucord.plugins
 import android.app.AlertDialog
 import android.content.Context
 import android.text.InputType
-import android.util.Base64
 import android.view.View
 import android.widget.*
 import com.aliucord.Http
@@ -11,28 +10,22 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
-import com.aliucord.utils.RNSuperProperties
 import com.discord.stores.StoreStream
 import com.discord.widgets.user.profile.UserProfileAdminView
 import com.discord.widgets.user.usersheet.WidgetUserSheet
 import org.json.JSONArray
 import org.json.JSONObject
-import java.lang.reflect.Field
 import java.lang.reflect.Method
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 @AliucordPlugin(requiresRestart = false)
 class ModernModActions : Plugin() {
 
-    // Official Discord permission bit flags (guild-level)
+    // Official Discord permission bit flags (guild-level), from Discord's own API docs.
     private object Perm {
         const val KICK_MEMBERS = 0x2L
         const val BAN_MEMBERS = 0x4L
@@ -40,21 +33,13 @@ class ModernModActions : Plugin() {
         const val MODERATE_MEMBERS = 1L shl 40 // Timeout Members
     }
 
-    // ثوابت لمحاكاة الكلاينت الحديث (React Native v10 Client Identity)
-    companion object {
-        private const val CURRENT_RN_BUILD_NUMBER = 6081
-        private const val CURRENT_RN_VERSION_CODE = 341200
-        private const val CURRENT_RN_VERSION = "341.0 - rn"
-        private const val CURRENT_RN_USER_AGENT = "Discord-Android/$CURRENT_RN_VERSION_CODE;RNA"
-        private val banScheduler = Executors.newSingleThreadScheduledExecutor()
-    }
-
     @Volatile private var activeUserId: Long = 0L
     @Volatile private var activeGuildId: Long = 0L
-    private var cachedSuperProperties: String? = null
 
     // ==========================================================
-    // Safe helpers
+    // Safe helpers: بدائل لدوال Kotlin stdlib اللي بتعمل كراش
+    // (isBlank / trim / toLongOrNull / lowercase / regex / firstOrNull ...)
+    // كلها بتستخدم while loops و charAt بس، من غير IntRange/IntIterator.
     // ==========================================================
 
     private fun isBlankSafe(s: String?): Boolean {
@@ -100,54 +85,6 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================================
-    // محاكاة خصائص الكلاينت وترقية الريكويست إلى v10
-    // ==========================================================
-
-    private fun currentSuperProperties(): String {
-        cachedSuperProperties?.let { return it }
-        return synchronized(this) {
-            cachedSuperProperties ?: buildCurrentSuperProperties().also { cachedSuperProperties = it }
-        }
-    }
-
-    private fun buildCurrentSuperProperties(): String {
-        val properties = try {
-            JSONObject(RNSuperProperties.superProperties.toString())
-        } catch (throwable: Throwable) {
-            JSONObject()
-        }
-
-        properties.put("has_client_mods", false)
-        properties.put("os", "Android")
-        properties.put("browser", "Discord Android")
-        properties.put("client_version", CURRENT_RN_VERSION)
-        properties.put("release_channel", "canaryRelease")
-        properties.put("client_build_number", CURRENT_RN_BUILD_NUMBER)
-        properties.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
-        return Base64.encodeToString(properties.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-    }
-
-    private fun createV10Request(path: String, method: String): Http.Request {
-        val req = Http.Request.newDiscordRequest(path, method)
-        try {
-            val conn = req.conn
-            val originalUrl = conn.url.toString()
-            if (originalUrl.contains("/api/v9/")) {
-                val upgradedUrl = originalUrl.replace("/api/v9/", "/api/v10/")
-                val urlField: Field = HttpURLConnection::class.java.getDeclaredField("url")
-                urlField.isAccessible = true
-                urlField.set(conn, URL(upgradedUrl))
-            }
-        } catch (t: Throwable) {
-            logger.error("Failed to upgrade endpoint to v10", t)
-        }
-
-        req.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
-        req.conn.setRequestProperty("X-Super-Properties", currentSuperProperties())
-        return req
-    }
-
-    // ==========================================================
 
     override fun start(context: Context) {
         patchSheetArgs()
@@ -167,6 +104,10 @@ class ModernModActions : Plugin() {
         }
     }
 
+    /**
+     * WidgetUserSheet.onViewCreated(View, Bundle) بيقرا ARG_USER_ID من الـ arguments بتاعته،
+     * فبنعمل hook عليه ونحفظ الـ ids من نفس الـ fragment instance اللي ديسكورد بيربطه.
+     */
     private fun patchSheetArgs() {
         val method = findMethod(WidgetUserSheet::class.java, "onViewCreated", 2)
         if (method == null) {
@@ -195,6 +136,10 @@ class ModernModActions : Plugin() {
         }
     }
 
+    /**
+     * بنخفي الزرار بس لو الحساب مالوش الصلاحية. عمرنا ما بنجبر زرار يظهر
+     * لأن ديسكورد عنده أسباب تانية للإخفاء (مثلاً مينفعش تبان نفسك).
+     */
     private fun patchVisibility() {
         val methods = findMethods(UserProfileAdminView::class.java, "updateView")
         if (methods.isEmpty()) {
@@ -231,13 +176,17 @@ class ModernModActions : Plugin() {
     }
 
     private fun hideIfMissing(root: View, resourceName: String, guildId: Long, permission: Long) {
-        if (hasPermission(guildId, permission)) return
+        if (hasPermission(guildId, permission)) return // leave Discord's own decision alone
         val resId = Utils.getResId(resourceName, "id")
         if (resId == 0) return
         val v = root.findViewById<View>(resId)
         if (v != null) v.visibility = View.GONE
     }
 
+    /**
+     * الربط الحقيقي للـ click بيحصل في الـ setters (setOnBan/setOnKick/setOnDisableCommunication).
+     * بنعمل patch للـ setter ونعيّن الـ listener بتاعنا بعد ما الأصلي يخلص.
+     */
     private fun patchClick(
         setterName: String,
         resourceName: String,
@@ -254,6 +203,12 @@ class ModernModActions : Plugin() {
             patcher.patch(method, Hook { frame ->
                 try {
                     val adminView = frame.thisObject as? UserProfileAdminView ?: return@Hook
+
+                    // لو مفيش guildId معروف دلوقتي، يبقى احنا في سياق تاني (زي Group DM
+                    // "Remove from group") مش سيرفر فعلي. الزرار ده بيشارك نفس الـ resource id،
+                    // فمنسيبوش لمنطق الطرد بتاعنا ونسيب استماع ديسكورد الأصلي يشتغل عادي.
+                    if (currentGuildId() == 0L) return@Hook
+
                     val resId = Utils.getResId(resourceName, "id")
                     if (resId == 0) {
                         logger.error("ModernModActions: no resource id '$resourceName'", null)
@@ -292,6 +247,10 @@ class ModernModActions : Plugin() {
 
     private fun currentGuildId(): Long = activeGuildId
 
+    /**
+     * بيقرا صلاحيات الحساب من permission store بتاع ديسكورد. لو فشل القراءة بنسمح (fail open)
+     * لأن API ديسكورد هيرفض بـ 403 لو الصلاحية فعلاً ناقصة.
+     */
     private fun currentGuildPermissions(guildId: Long): Long? = try {
         StoreStream.getPermissions().getGuildPermissions()[guildId]
     } catch (e: Throwable) {
@@ -300,10 +259,11 @@ class ModernModActions : Plugin() {
     }
 
     private fun hasPermission(guildId: Long, flag: Long): Boolean {
-        val perms = currentGuildPermissions(guildId) ?: return true
+        val perms = currentGuildPermissions(guildId) ?: return true // unknown -> fail open
         return (perms and flag) != 0L || (perms and Perm.ADMINISTRATOR) != 0L
     }
 
+    /** خطوة تأكيد تانية عشان ضغطة بالغلط ماتنفذش إجراء عقاب لوحدها. */
     private fun confirmAction(context: Context, title: String, summary: String, onConfirm: () -> Unit) {
         AlertDialog.Builder(context)
             .setTitle(title)
@@ -323,7 +283,7 @@ class ModernModActions : Plugin() {
         }
 
         val durationInput = EditText(context).apply {
-            hint = "Duration (Empty = 7 days, e.g. 60s, 2h, 7d)"
+            hint = "Duration (e.g. 60s, 10m, 2h, 7d)"
             inputType = InputType.TYPE_CLASS_TEXT
         }
         val reasonInput = EditText(context).apply {
@@ -341,16 +301,10 @@ class ModernModActions : Plugin() {
                 val durationText = trimSafe(durationInput.text.toString())
                 val reason = trimSafe(reasonInput.text.toString())
 
-                // إذا لم يتم تحديد مدة التايم = 7 أيام
-                val totalSeconds: Long = if (isBlankSafe(durationText)) {
-                    7L * 24L * 3600L
-                } else {
-                    val parsed = parseDuration(durationText)
-                    if (parsed == null) {
-                        Utils.showToast("Invalid format! Use s, m, h, or d (e.g. 60s, 30m, 1d)")
-                        return@setPositiveButton
-                    }
-                    parsed
+                val totalSeconds = parseDuration(durationText)
+                if (totalSeconds == null) {
+                    Utils.showToast("Invalid format! Use s, m, h, or d (e.g. 60s, 30m, 1d)")
+                    return@setPositiveButton
                 }
 
                 if (totalSeconds < 60L) {
@@ -364,8 +318,7 @@ class ModernModActions : Plugin() {
                     return@setPositiveButton
                 }
 
-                val displayDuration = if (isBlankSafe(durationText)) "7 days (Default)" else durationText
-                val summary = "Duration: " + displayDuration +
+                val summary = "Duration: " + durationText +
                     "\nReason: " + (if (isBlankSafe(reason)) "(none)" else reason)
 
                 confirmAction(context, "Confirm Timeout", summary) {
@@ -385,11 +338,15 @@ class ModernModActions : Plugin() {
             .show()
     }
 
+    /**
+     * Parser يدوي (char by char) من غير Regex ولا isBlank ولا toLongOrNull ولا lowercase.
+     * بيقبل: 60s / 10m / 2h / 7d / 1h30m / "1h 30m"
+     */
     private fun parseDuration(input: String?): Long? {
         if (input == null) return null
         val n = input.length
         var total = 0L
-        var current = -1L
+        var current = -1L // -1 = مفيش أرقام لسه
         var foundAny = false
         var i = 0
 
@@ -398,7 +355,7 @@ class ModernModActions : Plugin() {
             if (c >= '0' && c <= '9') {
                 val base = if (current < 0L) 0L else current
                 current = base * 10L + (c.code - '0'.code).toLong()
-                if (current > 100000000000L) return null
+                if (current > 100000000000L) return null // حماية من overflow
             } else if (Character.isWhitespace(c)) {
                 // تجاهل المسافات
             } else {
@@ -418,22 +375,26 @@ class ModernModActions : Plugin() {
             i++
         }
 
-        if (current >= 0L) return null
+        if (current >= 0L) return null // رقم من غير وحدة (مثلاً "30")
         return if (foundAny) total else null
     }
 
+    /**
+     * بيشيك لو الشخص المستهدف معاه Administrator (من رتبه). ديسكورد بيمنع الـ Timeout عن الأدمنز.
+     * بيرجع null لو معرفناش نتأكد (وقتها بنكمل عادي ونسيب ديسكورد يقرر).
+     */
     private fun targetIsAdmin(guildId: Long, userId: Long): Boolean? {
         try {
-            val memRes = createV10Request("/guilds/$guildId/members/$userId", "GET").execute()
+            val memRes = Http.Request.newDiscordRequest("/guilds/$guildId/members/$userId", "GET").execute()
             if (!memRes.ok()) return null
             val memberRoles = JSONObject(memRes.text()).optJSONArray("roles") ?: return null
 
-            val rolesRes = createV10Request("/guilds/$guildId/roles", "GET").execute()
+            val rolesRes = Http.Request.newDiscordRequest("/guilds/$guildId/roles", "GET").execute()
             if (!rolesRes.ok()) return null
             val allRoles = JSONArray(rolesRes.text())
 
             val ids = HashSet<String>()
-            ids.add(guildId.toString())
+            ids.add(guildId.toString()) // رتبة @everyone id بتاعها = id السيرفر
             var i = 0
             while (i < memberRoles.length()) {
                 ids.add(memberRoles.getString(i))
@@ -475,7 +436,7 @@ class ModernModActions : Plugin() {
                 val payload = JSONObject()
                 payload.put("communication_disabled_until", isoTimestamp ?: JSONObject.NULL)
 
-                val req = createV10Request("/guilds/$guildId/members/$userId", "PATCH")
+                val req = Http.Request.newDiscordRequest("/guilds/$guildId/members/$userId", "PATCH")
                     .setHeader("Content-Type", "application/json")
                 if (!isBlankSafe(reason)) {
                     req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
@@ -507,17 +468,12 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================
-    // واجهة وطلب الـ Ban الحديث عبر v10
+    // واجهة وطلب الـ Ban الحديث
     // ==========================================
     private fun showBanDialog(context: Context, guildId: Long, userId: Long) {
         val layout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 24, 48, 16)
-        }
-
-        val durationInput = EditText(context).apply {
-            hint = "Ban Duration (Empty = Permanent, e.g. 1d, 7d)"
-            inputType = InputType.TYPE_CLASS_TEXT
         }
 
         val reasonInput = EditText(context).apply {
@@ -552,7 +508,6 @@ class ModernModActions : Plugin() {
             adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, options)
         }
 
-        layout.addView(durationInput)
         layout.addView(deleteMsgLabel)
         layout.addView(spinner)
         layout.addView(reasonInput)
@@ -561,47 +516,26 @@ class ModernModActions : Plugin() {
             .setTitle("Ban Member")
             .setView(layout)
             .setPositiveButton("Ban") { _, _ ->
-                val durationText = trimSafe(durationInput.text.toString())
                 val reason = trimSafe(reasonInput.text.toString())
                 val pos = spinner.selectedItemPosition
                 val deleteSeconds = secondsMap[pos]
-
-                // لم يتم تحديد مدة = نهائي (null)
-                var banSeconds: Long? = null
-                if (!isBlankSafe(durationText)) {
-                    val parsed = parseDuration(durationText)
-                    if (parsed == null) {
-                        Utils.showToast("Invalid duration! Use s, m, h, or d (e.g. 12h, 3d)")
-                        return@setPositiveButton
-                    }
-                    val maxBanSeconds = 365L * 24L * 3600L // حد أقصى سنة للباند المؤقت
-                    if (parsed > maxBanSeconds) {
-                        Utils.showToast("Maximum ban duration is 365 days!")
-                        return@setPositiveButton
-                    }
-                    banSeconds = parsed
-                }
-
-                val durationSummary = if (banSeconds != null) durationText else "Permanent"
-                val summary = "Duration: " + durationSummary +
-                    "\nDelete messages: " + options[pos] +
+                val summary = "Delete messages: " + options[pos] +
                     "\nReason: " + (if (isBlankSafe(reason)) "(none)" else reason)
-
                 confirmAction(context, "Confirm Ban", summary) {
-                    executeBan(guildId, userId, deleteSeconds, reason, banSeconds)
+                    executeBan(guildId, userId, deleteSeconds, reason)
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun executeBan(guildId: Long, userId: Long, deleteSeconds: Long, reason: String, banDurationSeconds: Long?) {
+    private fun executeBan(guildId: Long, userId: Long, deleteSeconds: Long, reason: String) {
         Utils.threadPool.execute {
             try {
                 val payload = JSONObject()
                 payload.put("delete_message_seconds", deleteSeconds)
 
-                val req = createV10Request("/guilds/$guildId/bans/$userId", "PUT")
+                val req = Http.Request.newDiscordRequest("/guilds/$guildId/bans/$userId", "PUT")
                     .setHeader("Content-Type", "application/json")
                 if (!isBlankSafe(reason)) {
                     req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
@@ -609,15 +543,7 @@ class ModernModActions : Plugin() {
 
                 val res = req.executeWithBody(payload.toString())
                 if (res.ok()) {
-                    if (banDurationSeconds != null) {
-                        Utils.showToast("User banned temporarily!")
-                        // جدولة فك الباند تلقائياً بعد انقضاء الوقت
-                        banScheduler.schedule({
-                            executeUnban(guildId, userId, "Temporary ban expired")
-                        }, banDurationSeconds, TimeUnit.SECONDS)
-                    } else {
-                        Utils.showToast("User banned permanently!")
-                    }
+                    Utils.showToast("User banned successfully!")
                 } else {
                     logger.error("Ban Error: [${res.statusCode}] ${res.text()}", null)
                     Utils.showToast("Failed: HTTP ${res.statusCode}")
@@ -626,23 +552,6 @@ class ModernModActions : Plugin() {
                 logger.error("executeBan error", e)
                 Utils.showToast("Error: ${e.message}")
             }
-        }
-    }
-
-    private fun executeUnban(guildId: Long, userId: Long, reason: String) {
-        try {
-            val req = createV10Request("/guilds/$guildId/bans/$userId", "DELETE")
-            if (!isBlankSafe(reason)) {
-                req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
-            }
-            val res = req.execute()
-            if (res.ok()) {
-                logger.info("ModernModActions: User $userId automatically unbanned from $guildId")
-            } else {
-                logger.error("Auto Unban Error: [${res.statusCode}] ${res.text()}", null)
-            }
-        } catch (e: Exception) {
-            logger.error("executeUnban error", e)
         }
     }
 
@@ -671,7 +580,7 @@ class ModernModActions : Plugin() {
     private fun executeKick(guildId: Long, userId: Long, reason: String) {
         Utils.threadPool.execute {
             try {
-                val req = createV10Request("/guilds/$guildId/members/$userId", "DELETE")
+                val req = Http.Request.newDiscordRequest("/guilds/$guildId/members/$userId", "DELETE")
                 if (!isBlankSafe(reason)) {
                     req.setHeader("X-Audit-Log-Reason", URLEncoder.encode(reason, "UTF-8"))
                 }
@@ -692,7 +601,5 @@ class ModernModActions : Plugin() {
 
     override fun stop(context: Context) {
         patcher.unpatchAll()
-        banScheduler.shutdownNow()
     }
 }
-
