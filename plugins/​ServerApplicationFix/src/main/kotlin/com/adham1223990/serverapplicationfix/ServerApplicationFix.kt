@@ -2,7 +2,6 @@ package com.adham1223990.serverapplicationfix
 
 import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
@@ -12,7 +11,6 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 
 import com.aliucord.Http
-import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI
@@ -79,26 +77,32 @@ class ServerApplicationFix : Plugin() {
         }
 
         // 2. الاستماع التلقائي المباشر لتغيير السيرفر مع تحديد الأنواع بدقة
+        //
+        // ملحوظة: subscribe(onNext, onError) بلامدتين اتشال من نسخة Discord وقت التصغير
+        // (R8) لأن كود Discord نفسه ما بيستخدمهوش. استخدمنا هنا الـ overload اللي بياخد
+        // لامدا واحدة بس (onNext) وحطينا try/catch جواها بدل الـ onError المنفصل.
         try {
             guildSelectedSubscription = StoreStream.getGuildSelected()
                 .observeSelectedGuildId()
                 .subscribe({ guildIdLong: Long? ->
-                    if (guildIdLong == null || guildIdLong == 0L) return@subscribe
-                    val guildId = guildIdLong.toString()
+                    try {
+                        if (guildIdLong == null || guildIdLong == 0L) return@subscribe
+                        val guildId = guildIdLong.toString()
 
-                    if (checkedGuilds.contains(guildId)) return@subscribe
+                        if (checkedGuilds.contains(guildId)) return@subscribe
 
-                    val me = StoreStream.getUsers().me ?: return@subscribe
-                    val meIdLong = me.id.toLong()
-                    val targetGuildIdLong = guildIdLong.toLong()
-                    val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
+                        val me = StoreStream.getUsers().me ?: return@subscribe
+                        val meIdLong = me.id.toLong()
+                        val targetGuildIdLong = guildIdLong.toLong()
+                        val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
 
-                    // إذا كان العضو بدون رتب أو في حالة معاينة يتم التحقق
-                    if (member == null || member.roles.isEmpty()) {
-                        checkAndTriggerApplication(guildId, isAuto = true)
+                        // إذا كان العضو بدون رتب أو في حالة معاينة يتم التحقق
+                        if (member == null || member.roles.isEmpty()) {
+                            checkAndTriggerApplication(guildId, isAuto = true)
+                        }
+                    } catch (e: Throwable) {
+                        logger.error("Error handling guild selection", e)
                     }
-                }, { error: Throwable ->
-                    logger.error("Error observing selected guild", error)
                 })
         } catch (e: Exception) {
             logger.error("Failed to subscribe to observeSelectedGuildId", e)
@@ -114,7 +118,7 @@ class ServerApplicationFix : Plugin() {
             WidgetGuildContextMenu::class.java.getDeclaredMethod("getBinding").apply { isAccessible = true }
         }
         val gcmvm_cfg = WidgetGuildContextMenu::class.java.getDeclaredMethod(
-            "configureUI", 
+            "configureUI",
             GuildContextMenuViewModel.ViewState::class.java
         )
 
@@ -195,7 +199,7 @@ class ServerApplicationFix : Plugin() {
                 val req = Http.Request.newDiscordRequest("/guilds/$guildId/member-verification?with_guild=true", "GET")
                 req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
                 req.setHeader("X-Super-Properties", getSuperProperties())
-                
+
                 val response = req.execute()
                 if (!response.ok()) {
                     if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
