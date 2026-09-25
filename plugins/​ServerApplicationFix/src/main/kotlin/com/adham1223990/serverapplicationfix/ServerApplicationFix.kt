@@ -78,21 +78,23 @@ class ServerApplicationFix : Plugin() {
 
         // 2. الاستماع التلقائي المباشر لتغيير السيرفر مع تحديد الأنواع بدقة
         //
-        // ملحوظة: مكتبة RxJava نفسها في هذه النسخة من Discord معمول لها obfuscation، مش بس
-        // كود Discord. الدليل من result_observeSelectedGuildId.txt: StoreGuilds.java بينادي
-        // .u(new Action1<Long>(){...}) على نفس الـ Observable ده — يعني subscribe() اتسمى u()
-        // بعد التصغير. استخدمنا هنا الاسم الحقيقي u() بدل subscribe().
+        // ملحوظة: subscribe(Action1) الحقيقية في هذه النسخة اسمها V (مش subscribe ولا u).
+        // تأكدنا من كده من rx/Observable.java نفسه:
+        //   public final Subscription V(Action1<? super T> action1)   <- subscribe(onNext)
+        //   public final Subscription W(Action1, Action1<Throwable>)  <- subscribe(onNext, onError)
+        // أما u(Action1) فبترجع Observable مش Subscription — دي doOnNext مش subscribe،
+        // يعني معملتش حاجة فعليًا لو استخدمناها.
         try {
             guildSelectedSubscription = StoreStream.getGuildSelected()
                 .observeSelectedGuildId()
-                .u({ guildIdLong: Long? ->
+                .V({ guildIdLong: Long? ->
                     try {
-                        if (guildIdLong == null || guildIdLong == 0L) return@u
+                        if (guildIdLong == null || guildIdLong == 0L) return@V
                         val guildId = guildIdLong.toString()
 
-                        if (checkedGuilds.contains(guildId)) return@u
+                        if (checkedGuilds.contains(guildId)) return@V
 
-                        val me = StoreStream.getUsers().me ?: return@u
+                        val me = StoreStream.getUsers().me ?: return@V
                         val meIdLong = me.id.toLong()
                         val targetGuildIdLong = guildIdLong.toLong()
                         val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
