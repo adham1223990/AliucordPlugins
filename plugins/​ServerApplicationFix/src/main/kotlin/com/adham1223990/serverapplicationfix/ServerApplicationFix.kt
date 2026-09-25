@@ -78,20 +78,21 @@ class ServerApplicationFix : Plugin() {
 
         // 2. الاستماع التلقائي المباشر لتغيير السيرفر مع تحديد الأنواع بدقة
         //
-        // ملحوظة: subscribe(onNext, onError) بلامدتين اتشال من نسخة Discord وقت التصغير
-        // (R8) لأن كود Discord نفسه ما بيستخدمهوش. استخدمنا هنا الـ overload اللي بياخد
-        // لامدا واحدة بس (onNext) وحطينا try/catch جواها بدل الـ onError المنفصل.
+        // ملحوظة: مكتبة RxJava نفسها في هذه النسخة من Discord معمول لها obfuscation، مش بس
+        // كود Discord. الدليل من result_observeSelectedGuildId.txt: StoreGuilds.java بينادي
+        // .u(new Action1<Long>(){...}) على نفس الـ Observable ده — يعني subscribe() اتسمى u()
+        // بعد التصغير. استخدمنا هنا الاسم الحقيقي u() بدل subscribe().
         try {
             guildSelectedSubscription = StoreStream.getGuildSelected()
                 .observeSelectedGuildId()
-                .subscribe({ guildIdLong: Long? ->
+                .u({ guildIdLong: Long? ->
                     try {
-                        if (guildIdLong == null || guildIdLong == 0L) return@subscribe
+                        if (guildIdLong == null || guildIdLong == 0L) return@u
                         val guildId = guildIdLong.toString()
 
-                        if (checkedGuilds.contains(guildId)) return@subscribe
+                        if (checkedGuilds.contains(guildId)) return@u
 
-                        val me = StoreStream.getUsers().me ?: return@subscribe
+                        val me = StoreStream.getUsers().me ?: return@u
                         val meIdLong = me.id.toLong()
                         val targetGuildIdLong = guildIdLong.toLong()
                         val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
