@@ -19,12 +19,17 @@ import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.aliucord.utils.RNSuperProperties
 
+import com.discord.api.guild.Guild
 import com.discord.databinding.WidgetGuildContextMenuBinding
 import com.discord.stores.StoreStream
+import com.discord.utilities.captcha.CaptchaHelper
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
+import com.discord.widgets.guilds.join.GuildJoinHelperKt
+import com.discord.widgets.servers.member_verification.WidgetMemberVerification
 
 import com.lytefast.flexinput.R
+import kotlin.jvm.functions.Function1
 import org.json.JSONArray
 import org.json.JSONObject
 import rx.Subscription
@@ -109,6 +114,52 @@ class ServerApplicationFix : Plugin() {
                 })
         } catch (e: Exception) {
             logger.error("Failed to subscribe to observeSelectedGuildId", e)
+        }
+
+        // 2.5 الطريقة الأدق: كل طرق الانضمام (رابط، زرار Join في رسالة، ...) بتمر على
+        // GuildJoinHelperKt.joinGuild(...) نفسها. بنعمل PreHook (قبل تنفيذ الأصلية) عشان
+        // نستبدل الـ onNext (اللي بينفّذ لما الانضمام ينجح فعليًا) بنسخة بتنادي الأصلية
+        // وبعدين تتحقق من التطبيق فورًا - مش مضطرين ننتظر أو نعتمد على تغيير السيرفر المختار.
+        try {
+            val joinGuildMethod = GuildJoinHelperKt::class.java.getDeclaredMethod(
+                "joinGuild",
+                Context::class.java,
+                Long::class.javaPrimitiveType,
+                Boolean::class.javaPrimitiveType,
+                String::class.java,
+                Long::class.java,
+                String::class.java,
+                Class::class.java,
+                Function1::class.java,
+                Function1::class.java,
+                CaptchaHelper.CaptchaPayload::class.java,
+                Function1::class.java
+            )
+            patcher.patch(joinGuildMethod, PreHook { param ->
+                try {
+                    @Suppress("UNCHECKED_CAST")
+                    val originalOnNext = param.args[10] as? Function1<Any?, Unit>
+                    val wrapped: (Any?) -> Unit = { guildAny ->
+                        try {
+                            originalOnNext?.invoke(guildAny)
+                        } finally {
+                            try {
+                                val guild = guildAny as? Guild
+                                if (guild != null) {
+                                    checkAndTriggerApplication(guild.id.toString(), isAuto = true)
+                                }
+                            } catch (e: Throwable) {
+                                logger.error("Failed to read joined guild id", e)
+                            }
+                        }
+                    }
+                    param.args[10] = wrapped
+                } catch (e: Throwable) {
+                    logger.error("Failed to wrap joinGuild onNext", e)
+                }
+            })
+        } catch (e: Throwable) {
+            logger.error("Failed to patch GuildJoinHelperKt.joinGuild", e)
         }
 
         // 3. خيار الـ Context Menu اليدوي للسيرفر بأيقونة مضمونة التواجد
@@ -196,6 +247,11 @@ class ServerApplicationFix : Plugin() {
         return encoded
     }
 
+    /**
+     * بيشيك (عبر REST) هل السيرفر ده فعلاً عنده Membership Screening شغال، وإذا كان الأمر
+     * كذلك بيفتح شاشة Discord الرسمية WidgetMemberVerification مباشرة بدل بناء UI مخصص أو
+     * تخمين endpoint إرسال الفورم — الشاشة الأصلية بتحمّل وتبعت الفورم صح لوحدها.
+     */
     fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
         thread {
             try {
@@ -215,7 +271,6 @@ class ServerApplicationFix : Plugin() {
 
                 val root = JSONObject(response.text())
                 val formFields = root.optJSONArray("form_fields") ?: JSONArray()
-                val description = root.optString("description", "")
 
                 if (formFields.length() == 0) {
                     if (!isAuto) Utils.showToast("No active application for this server.", false)
@@ -226,41 +281,18 @@ class ServerApplicationFix : Plugin() {
 
                 Handler(Looper.getMainLooper()).post {
                     val activity = getSafeActivity()
-                    val page = ApplicationPage(this, guildId, description, formFields)
-                    Utils.openPageWithProxy(activity, page)
+                    val guildIdLong = guildId.toLongOrNull()
+                    if (guildIdLong == null) {
+                        Utils.showToast("Invalid guild id", false)
+                        return@post
+                    }
+                    WidgetMemberVerification.create(activity, guildIdLong, "aliucord", null)
                 }
             } catch (e: Exception) {
                 logger.error("Auto check error for guild $guildId", e)
                 if (!isAuto) {
                     Utils.showToast("Failed to check: ${e.message}", false)
                 }
-            }
-        }
-    }
-
-    fun submitForm(guildId: String, formPayload: JSONArray, onComplete: (Boolean, String?) -> Unit) {
-        thread {
-            try {
-                val body = JSONObject().apply {
-                    put("form_fields", formPayload)
-                }
-
-                val req = Http.Request.newDiscordRNRequest("/guilds/$guildId/requests/@me", "PUT")
-                req.setHeader("Content-Type", "application/json")
-                req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
-                req.setHeader("X-Super-Properties", getSuperProperties())
-
-                val res = req.executeWithBody(body.toString())
-                if (res.ok()) {
-                    checkedGuilds.remove(guildId)
-                    onComplete(true, null)
-                } else {
-                    val code = res.statusCode
-                    onComplete(false, "Server response code: $code")
-                }
-            } catch (e: Exception) {
-                logger.error("Error submitting application", e)
-                onComplete(false, e.message)
             }
         }
     }
