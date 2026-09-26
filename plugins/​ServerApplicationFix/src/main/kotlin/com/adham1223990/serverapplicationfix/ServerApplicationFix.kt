@@ -20,10 +20,12 @@ import com.aliucord.patcher.PreHook
 import com.aliucord.utils.RNSuperProperties
 
 import com.discord.databinding.WidgetGuildContextMenuBinding
+import com.discord.models.domain.ModelInvite
 import com.discord.stores.StoreStream
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
 import com.discord.widgets.guilds.join.GuildJoinHelperKt
+import com.discord.widgets.servers.member_verification.WidgetMemberVerification
 
 import com.lytefast.flexinput.R
 import kotlin.jvm.functions.Function1
@@ -154,6 +156,38 @@ class ServerApplicationFix : Plugin() {
             }
         } catch (e: Throwable) {
             logger.error("Failed to patch GuildJoinHelperKt.joinGuild", e)
+        }
+
+        // 2.6 التصحيح الفعلي: لما السيرفر فيه Membership Screening (Verification Gate)،
+        // دسكورد أصلاً مش بيعدي على GuildJoinHelperKt.joinGuild خالص — بيقفز على طول لفتح
+        // شاشته الأصلية عن طريق MemberVerificationUtils.showMemberVerificationWidget() اللي
+        // بتنده على WidgetMemberVerification.Companion.create(...). ده نقطة الاختناق الوحيدة
+        // (تأكدنا منها من الديكومبايل)، فبنعمل PreHook هنا ونمنع تنفيذ الأصلي بالكامل
+        // (param.setResult(null)) ونفتح ApplicationPage بتاعتنا بدالها، سواء الانضمام جه من
+        // زرار Join عادي أو من قبول Invite لسيرفر مقفول بـ verification gate.
+        try {
+            val createMethod = WidgetMemberVerification.Companion::class.java.getDeclaredMethod(
+                "create",
+                Context::class.java,
+                Long::class.javaPrimitiveType,
+                String::class.java,
+                ModelInvite::class.java
+            )
+            patcher.patch(createMethod, PreHook { param ->
+                try {
+                    val guildIdLong = param.args[1] as Long
+                    val guildId = guildIdLong.toString()
+                    logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId")
+                    checkAndTriggerApplication(guildId, isAuto = false)
+                    param.setResult(null)
+                } catch (e: Throwable) {
+                    logger.error("Failed to intercept WidgetMemberVerification.create for guild", e)
+                }
+            })
+            logger.info("ServerApplicationFix: patched WidgetMemberVerification.Companion.create")
+        } catch (e: Throwable) {
+            logger.error("Failed to patch WidgetMemberVerification.Companion.create", e)
+            Utils.showToast("ServerApplicationFix: couldn't hook the native verification screen, plugin needs an update.", false)
         }
 
         // 3. خيار الـ Context Menu اليدوي للسيرفر بأيقونة مضمونة التواجد
