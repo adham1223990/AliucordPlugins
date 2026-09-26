@@ -24,11 +24,9 @@ import com.discord.stores.StoreStream
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
 import com.discord.widgets.guilds.join.GuildJoinHelperKt
-import com.discord.widgets.servers.member_verification.WidgetMemberVerification
 
 import com.lytefast.flexinput.R
 import kotlin.jvm.functions.Function1
-import org.json.JSONArray
 import org.json.JSONObject
 import rx.Subscription
 import kotlin.concurrent.thread
@@ -244,31 +242,16 @@ class ServerApplicationFix : Plugin() {
     }
 
     /**
-     * بيشيك (عبر REST) هل السيرفر ده فعلاً عنده Membership Screening شغال، وإذا كان الأمر
-     * كذلك بيفتح شاشة Discord الرسمية WidgetMemberVerification مباشرة بدل بناء UI مخصص أو
-     * تخمين endpoint إرسال الفورم — الشاشة الأصلية بتحمّل وتبعت الفورم صح لوحدها.
+     * Uses ApplicationApi (our own spoofed requests) both to check whether a form exists AND
+     * to open our custom ApplicationPage — never Discord's native screen, since that uses the
+     * app's real, un-spoofed internal REST client and gets rejected on an outdated build.
      */
     fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
         thread {
             try {
-                val req = Http.Request.newDiscordRNRequest("/guilds/$guildId/member-verification?with_guild=true", "GET")
-                req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
-                req.setHeader("X-Super-Properties", getSuperProperties())
+                val form = ApplicationApi.fetchForm(guildId)
 
-                val response = req.execute()
-                if (!response.ok()) {
-                    logger.error(
-                        "member-verification check failed for guild $guildId: HTTP ${response.statusCode}",
-                        null
-                    )
-                    if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
-                    return@thread
-                }
-
-                val root = JSONObject(response.text())
-                val formFields = root.optJSONArray("form_fields") ?: JSONArray()
-
-                if (formFields.length() == 0) {
+                if (form.fields.isEmpty()) {
                     if (!isAuto) Utils.showToast("No active application for this server.", false)
                     return@thread
                 }
@@ -276,14 +259,11 @@ class ServerApplicationFix : Plugin() {
                 checkedGuilds.add(guildId)
 
                 Handler(Looper.getMainLooper()).post {
-                    val activity = getSafeActivity()
-                    val guildIdLong = guildId.toLongOrNull()
-                    if (guildIdLong == null) {
-                        Utils.showToast("Invalid guild id", false)
-                        return@post
-                    }
-                    WidgetMemberVerification.create(activity, guildIdLong, "aliucord", null)
+                    Utils.openPageWithProxy(getSafeActivity(), ApplicationPage(guildId))
                 }
+            } catch (e: ApplicationApiException) {
+                logger.error("member-verification check failed for guild $guildId: HTTP ${e.statusCode}", e)
+                if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
             } catch (e: Exception) {
                 logger.error("Auto check error for guild $guildId", e)
                 if (!isAuto) {
