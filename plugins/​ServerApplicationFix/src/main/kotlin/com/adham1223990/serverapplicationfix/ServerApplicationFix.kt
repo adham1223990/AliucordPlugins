@@ -19,7 +19,6 @@ import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.aliucord.utils.RNSuperProperties
 
-import com.discord.api.guild.Guild
 import com.discord.databinding.WidgetGuildContextMenuBinding
 import com.discord.stores.StoreStream
 import com.discord.utilities.captcha.CaptchaHelper
@@ -144,9 +143,10 @@ class ServerApplicationFix : Plugin() {
                             originalOnNext?.invoke(guildAny)
                         } finally {
                             try {
-                                val guild = guildAny as? Guild
-                                if (guild != null) {
-                                    checkAndTriggerApplication(guild.getId().toString(), isAuto = true)
+                                if (guildAny != null) {
+                                    val idMethod = guildAny.javaClass.getMethod("getId")
+                                    val gid = idMethod.invoke(guildAny)
+                                    checkAndTriggerApplication(gid.toString(), isAuto = true)
                                 }
                             } catch (e: Throwable) {
                                 logger.error("Failed to read joined guild id", e)
