@@ -21,7 +21,6 @@ import com.aliucord.utils.RNSuperProperties
 
 import com.discord.databinding.WidgetGuildContextMenuBinding
 import com.discord.stores.StoreStream
-import com.discord.utilities.captcha.CaptchaHelper
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
 import com.discord.widgets.guilds.join.GuildJoinHelperKt
@@ -120,44 +119,41 @@ class ServerApplicationFix : Plugin() {
         // نستبدل الـ onNext (اللي بينفّذ لما الانضمام ينجح فعليًا) بنسخة بتنادي الأصلية
         // وبعدين تتحقق من التطبيق فورًا - مش مضطرين ننتظر أو نعتمد على تغيير السيرفر المختار.
         try {
-            val joinGuildMethod = GuildJoinHelperKt::class.java.getDeclaredMethod(
-                "joinGuild",
-                Context::class.java,
-                Long::class.javaPrimitiveType,
-                Boolean::class.javaPrimitiveType,
-                String::class.java,
-                Long::class.java,
-                String::class.java,
-                Class::class.java,
-                Function1::class.java,
-                Function1::class.java,
-                CaptchaHelper.CaptchaPayload::class.java,
-                Function1::class.java
-            )
-            patcher.patch(joinGuildMethod, PreHook { param ->
-                try {
-                    @Suppress("UNCHECKED_CAST")
-                    val originalOnNext = param.args[10] as? Function1<Any?, Unit>
-                    val wrapped: (Any?) -> Unit = { guildAny ->
-                        try {
-                            originalOnNext?.invoke(guildAny)
-                        } finally {
+            val joinGuildMethod = GuildJoinHelperKt::class.java.declaredMethods
+                .firstOrNull { it.name == "joinGuild" }
+
+            if (joinGuildMethod == null) {
+                logger.error("ServerApplicationFix: joinGuild not found on GuildJoinHelperKt", null)
+                Utils.showToast("ServerApplicationFix: joinGuild not found, plugin needs an update.", false)
+            } else {
+                val onNextIndex = joinGuildMethod.parameterCount - 1
+                patcher.patch(joinGuildMethod, PreHook { param ->
+                    try {
+                        @Suppress("UNCHECKED_CAST")
+                        val originalOnNext = param.args[onNextIndex] as? Function1<Any?, Unit>
+                        val wrapped: (Any?) -> Unit = { guildAny ->
                             try {
-                                if (guildAny != null) {
-                                    val idMethod = guildAny.javaClass.getMethod("getId")
-                                    val gid = idMethod.invoke(guildAny)
-                                    checkAndTriggerApplication(gid.toString(), isAuto = true)
+                                originalOnNext?.invoke(guildAny)
+                            } finally {
+                                try {
+                                    if (guildAny != null) {
+                                        val idMethod = guildAny.javaClass.getMethod("getId")
+                                        val gid = idMethod.invoke(guildAny)
+                                        logger.info("ServerApplicationFix: joinGuild succeeded for guild $gid")
+                                        checkAndTriggerApplication(gid.toString(), isAuto = true)
+                                    }
+                                } catch (e: Throwable) {
+                                    logger.error("Failed to read joined guild id", e)
                                 }
-                            } catch (e: Throwable) {
-                                logger.error("Failed to read joined guild id", e)
                             }
                         }
+                        param.args[onNextIndex] = wrapped
+                    } catch (e: Throwable) {
+                        logger.error("Failed to wrap joinGuild onNext", e)
                     }
-                    param.args[10] = wrapped
-                } catch (e: Throwable) {
-                    logger.error("Failed to wrap joinGuild onNext", e)
-                }
-            })
+                })
+                logger.info("ServerApplicationFix: patched GuildJoinHelperKt.joinGuild (onNext at index $onNextIndex)")
+            }
         } catch (e: Throwable) {
             logger.error("Failed to patch GuildJoinHelperKt.joinGuild", e)
         }
