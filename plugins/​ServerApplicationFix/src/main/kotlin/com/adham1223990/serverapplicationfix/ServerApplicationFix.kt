@@ -146,7 +146,7 @@ class ServerApplicationFix : Plugin() {
                             try {
                                 val guild = guildAny as? Guild
                                 if (guild != null) {
-                                    checkAndTriggerApplication(guild.id.toString(), isAuto = true)
+                                    checkAndTriggerApplication(guild.getId().toString(), isAuto = true)
                                 }
                             } catch (e: Throwable) {
                                 logger.error("Failed to read joined guild id", e)
