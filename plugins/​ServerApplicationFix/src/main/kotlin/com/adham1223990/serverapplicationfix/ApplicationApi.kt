@@ -40,26 +40,35 @@ object ApplicationApi {
         val version = root.optString("version", "1")
         val fieldsJson = root.optJSONArray("form_fields") ?: JSONArray()
         val fields = ArrayList<VerificationField>()
-        for (i in 0 until fieldsJson.length()) {
-            val f = fieldsJson.optJSONObject(i) ?: continue
-            val fieldType = f.optString("field_type", "UNKNOWN")
-            fields.add(
-                VerificationField(
-                    fieldType = fieldType,
-                    label = f.optString("label", ""),
-                    required = f.optBoolean("required", false),
-                    values = f.optJSONArray("values").toStringList(),
-                    choices = f.optJSONArray("choices").toStringList(),
-                    response = if (fieldType == "MULTIPLE_CHOICE") -1 else ""
+        
+        var i = 0
+        val len = fieldsJson.length()
+        while (i < len) {
+            val f = fieldsJson.optJSONObject(i)
+            if (f != null) {
+                val fieldType = f.optString("field_type", "UNKNOWN")
+                fields.add(
+                    VerificationField(
+                        fieldType = fieldType,
+                        label = f.optString("label", ""),
+                        required = f.optBoolean("required", false),
+                        values = f.optJSONArray("values").toStringList(),
+                        choices = f.optJSONArray("choices").toStringList(),
+                        response = if (fieldType == "MULTIPLE_CHOICE") -1 else ""
+                    )
                 )
-            )
+            }
+            i++
         }
         return VerificationForm(version, fields)
     }
 
     fun submitForm(guildId: String, form: VerificationForm) {
         val fieldsArr = JSONArray()
-        for (field in form.fields) {
+        var i = 0
+        val len = form.fields.size
+        while (i < len) {
+            val field = form.fields[i]
             fieldsArr.put(
                 JSONObject().apply {
                     put("field_type", field.fieldType)
@@ -70,6 +79,7 @@ object ApplicationApi {
                     put("response", field.response)
                 }
             )
+            i++
         }
         val body = JSONObject().apply {
             put("version", form.version)
@@ -95,10 +105,6 @@ object ApplicationApi {
         } catch (e: ApplicationApiException) {
             throw e
         } catch (t: Throwable) {
-            // Aliucord's Http.Request throws its own exception for non-2xx responses before we
-            // ever get to read the body ourselves, so its message is just the generic HTTP
-            // reason phrase (e.g. "403: Forbidden"), not Discord's actual JSON error. Pull the
-            // real body straight off the connection's error stream instead.
             val conn = req.conn
             val code = try { conn.responseCode } catch (e2: Throwable) { -1 }
             val errorBody = try {
@@ -129,8 +135,6 @@ object ApplicationApi {
         return req
     }
 
-    /** Confirmed correct source (from a plugin that prints this exact value): the live app
-     *  token lives at RestAPI.AppHeadersProvider.INSTANCE.authToken, not on StoreAuthentication. */
     private fun currentAuthToken(): String? {
         return try {
             RestAPI.AppHeadersProvider.INSTANCE.authToken
@@ -176,7 +180,12 @@ object ApplicationApi {
     private fun JSONArray?.toStringList(): List<String> {
         if (this == null) return emptyList()
         val out = ArrayList<String>()
-        for (i in 0 until length()) out.add(optString(i, ""))
+        var i = 0
+        val len = length()
+        while (i < len) {
+            out.add(optString(i, ""))
+            i++
+        }
         return out
     }
 }
