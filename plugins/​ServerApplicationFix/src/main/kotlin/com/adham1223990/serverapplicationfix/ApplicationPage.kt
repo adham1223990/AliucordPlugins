@@ -81,14 +81,21 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
     }
 
     private fun renderForm(ctx: Context, f: VerificationForm) {
-        for (field in f.fields) {
+        var fieldIdx = 0
+        val fieldsCount = f.fields.size
+        while (fieldIdx < fieldsCount) {
+            val field = f.fields[fieldIdx]
             when (field.fieldType) {
                 "TERMS" -> {
-                    for (rule in field.values) {
+                    var valIdx = 0
+                    val valCount = field.values.size
+                    while (valIdx < valCount) {
+                        val rule = field.values[valIdx]
                         container.addView(TextView(ctx).apply {
                             text = rule
                             setPadding(32, 8, 32, 8)
                         })
+                        valIdx++
                     }
                     container.addView(CheckBox(ctx).apply {
                         text = if (field.required) "I have read and agree (required)" else "I have read and agree"
@@ -125,18 +132,25 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                         setPadding(32, 16, 32, 4)
                     })
                     val group = RadioGroup(ctx).apply { orientation = RadioGroup.VERTICAL }
-                    for (choice in field.choices) {
+                    var choiceIdx = 0
+                    val choicesCount = field.choices.size
+                    while (choiceIdx < choicesCount) {
+                        val choice = field.choices[choiceIdx]
                         group.addView(RadioButton(ctx).apply {
                             text = choice
                             id = View.generateViewId()
                         })
+                        choiceIdx++
                     }
                     group.setOnCheckedChangeListener { rg, checkedId ->
-                        for (i in 0 until rg.childCount) {
-                            if (rg.getChildAt(i).id == checkedId) {
-                                field.response = i
+                        var childIdx = 0
+                        val count = rg.childCount
+                        while (childIdx < count) {
+                            if (rg.getChildAt(childIdx).id == checkedId) {
+                                field.response = childIdx
                                 break
                             }
+                            childIdx++
                         }
                     }
                     container.addView(group)
@@ -150,6 +164,7 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                     })
                 }
             }
+            fieldIdx++
         }
 
         container.addView(Button(ctx).apply {
