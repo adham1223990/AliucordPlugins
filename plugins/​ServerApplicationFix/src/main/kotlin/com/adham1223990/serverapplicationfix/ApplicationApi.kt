@@ -80,17 +80,35 @@ object ApplicationApi {
 
     private fun request(path: String, method: String, body: JSONObject? = null): JSONObject {
         val req = createV10Request(path, method)
-        val response = if (body != null) {
-            req.setHeader("Content-Type", "application/json")
-            req.executeWithBody(body.toString())
-        } else {
-            req.execute()
+        try {
+            val response = if (body != null) {
+                req.setHeader("Content-Type", "application/json")
+                req.executeWithBody(body.toString())
+            } else {
+                req.execute()
+            }
+            if (!response.ok()) {
+                throw ApplicationApiException(response.statusCode, "${response.statusCode}: ${response.text().take(300)}")
+            }
+            val text = response.text()
+            return if (text.isBlank()) JSONObject() else JSONObject(text)
+        } catch (e: ApplicationApiException) {
+            throw e
+        } catch (t: Throwable) {
+            // Aliucord's Http.Request throws its own exception for non-2xx responses before we
+            // ever get to read the body ourselves, so its message is just the generic HTTP
+            // reason phrase (e.g. "403: Forbidden"), not Discord's actual JSON error. Pull the
+            // real body straight off the connection's error stream instead.
+            val conn = req.conn
+            val code = try { conn.responseCode } catch (e2: Throwable) { -1 }
+            val errorBody = try {
+                conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            } catch (e2: Throwable) {
+                ""
+            }
+            val message = if (errorBody.isNotBlank()) "$code: ${errorBody.take(300)}" else "$code: ${t.message}"
+            throw ApplicationApiException(code, message)
         }
-        if (!response.ok()) {
-            throw ApplicationApiException(response.statusCode, "${response.statusCode}: ${response.text().take(300)}")
-        }
-        val text = response.text()
-        return if (text.isBlank()) JSONObject() else JSONObject(text)
     }
 
     fun createV10Request(path: String, method: String): Http.Request {
