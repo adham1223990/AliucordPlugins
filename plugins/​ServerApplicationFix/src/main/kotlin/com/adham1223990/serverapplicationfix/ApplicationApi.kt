@@ -31,7 +31,7 @@ data class VerificationForm(val version: String, val fields: List<VerificationFi
  *
  * Both requests are built and spoofed here directly (see createV10Request below) — upgraded
  * from Discord's default /api/v9/ to /api/v10/, with our own User-Agent / X-Super-Properties
- * set on the connection. This no longer relies on ServerApplicationFix's Http.Request patches.
+ * set on the connection.
  */
 object ApplicationApi {
 
@@ -103,13 +103,18 @@ object ApplicationApi {
      * up as usual), then upgrades it from Discord's default /api/v9/ route to /api/v10/ by
      * rewriting HttpURLConnection's private `url` field via reflection — before the connection
      * is actually opened, so this is safe — and sets the spoofed User-Agent / X-Super-Properties
-     * directly on the connection. This makes ApplicationApi fully self-contained: it no longer
-     * depends on ServerApplicationFix's Http.Request.setHeader / newDiscordRNRequest patches.
+     * directly on the connection.
      */
-    private fun createV10Request(path: String, method: String): Http.Request {
+    fun createV10Request(path: String, method: String): Http.Request {
         val req = Http.Request.newDiscordRequest(path, method)
+        upgradeConnectionUrl(req.conn)
+        req.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
+        req.conn.setRequestProperty("X-Super-Properties", currentSuperProperties())
+        return req
+    }
+
+    fun upgradeConnectionUrl(conn: HttpURLConnection) {
         try {
-            val conn = req.conn
             val originalUrl = conn.url.toString()
             if (originalUrl.contains("/api/v9/")) {
                 val upgradedUrl = originalUrl.replace("/api/v9/", "/api/v10/")
@@ -118,13 +123,8 @@ object ApplicationApi {
                 urlField.set(conn, URL(upgradedUrl))
             }
         } catch (t: Throwable) {
-            // Best effort: if this fails we still send the request on whatever version
-            // newDiscordRequest defaulted to, instead of crashing the call outright.
+            // Fallback: Continue without crashing
         }
-
-        req.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
-        req.conn.setRequestProperty("X-Super-Properties", currentSuperProperties())
-        return req
     }
 
     private fun currentSuperProperties(): String {
