@@ -4,7 +4,7 @@ import android.os.Build
 import android.util.Base64
 import com.aliucord.Http
 import com.aliucord.utils.RNSuperProperties
-import com.discord.stores.StoreStream
+import com.discord.utilities.rest.RestAPI
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -99,7 +99,7 @@ object ApplicationApi {
 
         val req = Http.Request(fullUrl, method)
 
-        val token = runCatching { StoreStream.getAuthentication().authToken }.getOrNull()
+        val token = currentAuthToken()
         if (!token.isNullOrEmpty()) {
             req.setHeader("Authorization", token)
         }
@@ -109,6 +109,16 @@ object ApplicationApi {
         req.setHeader("Accept-Language", Locale.getDefault().toLanguageTag())
 
         return req
+    }
+
+    /** Confirmed correct source (from a plugin that prints this exact value): the live app
+     *  token lives at RestAPI.AppHeadersProvider.INSTANCE.authToken, not on StoreAuthentication. */
+    private fun currentAuthToken(): String? {
+        return try {
+            RestAPI.AppHeadersProvider.INSTANCE.authToken
+        } catch (e: Throwable) {
+            null
+        }
     }
 
     fun getSuperProperties(): String {
