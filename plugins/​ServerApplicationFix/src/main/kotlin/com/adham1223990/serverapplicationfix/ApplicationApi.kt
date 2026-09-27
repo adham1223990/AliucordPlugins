@@ -1,18 +1,16 @@
 package com.adham1223990.serverapplicationfix
 
+import android.os.Build
 import android.util.Base64
 import com.aliucord.Http
 import com.aliucord.utils.RNSuperProperties
+import com.discord.stores.StoreStream
 import org.json.JSONArray
 import org.json.JSONObject
-import java.lang.reflect.Field
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.Locale
 
 class ApplicationApiException(val statusCode: Int, message: String) : Exception(message)
 
-/** One entry from "form_fields". [response] is what gets sent back: String for TERMS/TEXT_INPUT/
- *  PARAGRAPH, Int (choice index) for MULTIPLE_CHOICE — matching Discord's own parser exactly. */
 data class VerificationField(
     val fieldType: String,
     val label: String,
@@ -24,20 +22,17 @@ data class VerificationField(
 
 data class VerificationForm(val version: String, val fields: List<VerificationField>)
 
-/**
- * Talks to the real endpoints confirmed from RestAPIInterface.java:
- *   GET /guilds/{guildId}/member-verification            -> ModelMemberVerificationForm
- *   PUT /guilds/{guildId}/requests/@me  (RestAPIParams.MemberVerificationForm body)
- *
- * Both requests are built and spoofed here directly (see createV10Request below) — upgraded
- * from Discord's default /api/v9/ to /api/v10/, with our own User-Agent / X-Super-Properties
- * set on the connection.
- */
 object ApplicationApi {
 
-    private const val CURRENT_RN_BUILD_NUMBER = 6081
-    private const val CURRENT_RN_VERSION = "341.0 - rn"
-    private const val CURRENT_RN_USER_AGENT = "Discord-Android/341200;RNA"
+    private const val API_BASE = "https://discord.com/api/v10"
+    
+    private const val RN_VERSION = "225.17 - rn"
+    private const val RN_BUILD_NUMBER = 225017
+    private const val RN_NATIVE_BUILD = 4320
+    private const val RN_RELEASE_CHANNEL = "googleRelease"
+    const val CURRENT_RN_USER_AGENT = "Discord-Android/$RN_BUILD_NUMBER;RNA"
+
+    @Volatile
     private var cachedSuperProperties: String? = null
 
     fun fetchForm(guildId: String): VerificationForm {
@@ -92,64 +87,62 @@ object ApplicationApi {
             req.execute()
         }
         if (!response.ok()) {
-            throw ApplicationApiException(response.statusCode, response.text().take(300))
+            throw ApplicationApiException(response.statusCode, "${response.statusCode}: ${response.text().take(300)}")
         }
         val text = response.text()
         return if (text.isBlank()) JSONObject() else JSONObject(text)
     }
 
-    /**
-     * Builds the request through Aliucord's own newDiscordRequest (auth/cookies etc. are set
-     * up as usual), then upgrades it from Discord's default /api/v9/ route to /api/v10/ by
-     * rewriting HttpURLConnection's private `url` field via reflection — before the connection
-     * is actually opened, so this is safe — and sets the spoofed User-Agent / X-Super-Properties
-     * directly on the connection.
-     */
     fun createV10Request(path: String, method: String): Http.Request {
-        val req = Http.Request.newDiscordRequest(path, method)
-        upgradeConnectionUrl(req.conn)
-        req.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
-        req.conn.setRequestProperty("X-Super-Properties", currentSuperProperties())
+        val cleanPath = if (path.startsWith("/")) path else "/$path"
+        val fullUrl = "$API_BASE$cleanPath"
+
+        val req = Http.Request(fullUrl, method)
+
+        val token = runCatching { StoreStream.getAuthentication().authToken }.getOrNull()
+        if (!token.isNullOrEmpty()) {
+            req.setHeader("Authorization", token)
+        }
+
+        req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
+        req.setHeader("X-Super-Properties", getSuperProperties())
+        req.setHeader("Accept-Language", Locale.getDefault().toLanguageTag())
+
         return req
     }
 
-    fun upgradeConnectionUrl(conn: HttpURLConnection) {
-        try {
-            val originalUrl = conn.url.toString()
-            if (originalUrl.contains("/api/v9/")) {
-                val upgradedUrl = originalUrl.replace("/api/v9/", "/api/v10/")
-                val urlField: Field = HttpURLConnection::class.java.getDeclaredField("url")
-                urlField.isAccessible = true
-                urlField.set(conn, URL(upgradedUrl))
-            }
-        } catch (t: Throwable) {
-            // Fallback: Continue without crashing
-        }
-    }
-
-    private fun currentSuperProperties(): String {
+    fun getSuperProperties(): String {
         cachedSuperProperties?.let { return it }
         return synchronized(this) {
-            cachedSuperProperties ?: buildSuperProperties().also { cachedSuperProperties = it }
+            cachedSuperProperties ?: buildDeviceSuperProperties().also { cachedSuperProperties = it }
         }
     }
 
-    private fun buildSuperProperties(): String {
-        val props = try {
+    private fun buildDeviceSuperProperties(): String {
+        val properties = runCatching {
             JSONObject(RNSuperProperties.superProperties.toString())
-        } catch (t: Throwable) {
-            JSONObject()
-        }
+        }.getOrElse { JSONObject() }
 
-        props.put("has_client_mods", false)
-        props.put("os", "Android")
-        props.put("browser", "Discord Android")
-        props.put("client_version", CURRENT_RN_VERSION)
-        props.put("release_channel", "canaryRelease")
-        props.put("client_build_number", CURRENT_RN_BUILD_NUMBER)
-        props.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
+        properties.put("os", "Android")
+        properties.put("browser", "Discord Android")
+        properties.put("device", Build.MODEL)
+        properties.put("device_manufacturer", Build.MANUFACTURER)
+        properties.put("device_model", Build.MODEL)
+        properties.put("os_version", Build.VERSION.RELEASE)
+        properties.put("os_sdk_version", Build.VERSION.SDK_INT.toString())
+        properties.put("system_locale", Locale.getDefault().toLanguageTag())
+        properties.put("client_version", RN_VERSION)
+        properties.put("release_channel", RN_RELEASE_CHANNEL)
+        properties.put("client_build_number", RN_BUILD_NUMBER)
+        properties.put("native_build_number", RN_NATIVE_BUILD)
+        properties.put("has_client_mods", false)
+        properties.put("design_id", 0)
+        properties.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
 
-        return Base64.encodeToString(props.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        return Base64.encodeToString(
+            properties.toString().toByteArray(Charsets.UTF_8),
+            Base64.NO_WRAP
+        )
     }
 
     private fun JSONArray?.toStringList(): List<String> {
