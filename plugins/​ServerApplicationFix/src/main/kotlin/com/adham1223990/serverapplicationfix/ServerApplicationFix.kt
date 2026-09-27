@@ -20,20 +20,15 @@ import com.aliucord.patcher.PreHook
 import com.aliucord.utils.RNSuperProperties
 
 import com.discord.databinding.WidgetGuildContextMenuBinding
-import com.discord.models.domain.ModelInvite
 import com.discord.stores.StoreStream
 import com.discord.widgets.guilds.contextmenu.GuildContextMenuViewModel
 import com.discord.widgets.guilds.contextmenu.WidgetGuildContextMenu
 import com.discord.widgets.guilds.join.GuildJoinHelperKt
-import com.discord.widgets.servers.member_verification.WidgetMemberVerification
 
 import com.lytefast.flexinput.R
 import kotlin.jvm.functions.Function1
 import org.json.JSONObject
 import rx.Subscription
-import java.lang.reflect.Field
-import java.net.HttpURLConnection
-import java.net.URL
 import kotlin.concurrent.thread
 
 @AliucordPlugin(requiresRestart = false)
@@ -51,29 +46,13 @@ class ServerApplicationFix : Plugin() {
     private val checkedGuilds = HashSet<String>()
     private var guildSelectedSubscription: Subscription? = null
 
-    private fun upgradeUrlToV10(conn: HttpURLConnection) {
-        try {
-            val originalUrl = conn.url.toString()
-            if (originalUrl.contains("/api/v9/")) {
-                val upgradedUrl = originalUrl.replace("/api/v9/", "/api/v10/")
-                val urlField: Field = HttpURLConnection::class.java.getDeclaredField("url")
-                urlField.isAccessible = true
-                urlField.set(conn, URL(upgradedUrl))
-            }
-        } catch (t: Throwable) {
-            // Best effort
-        }
-    }
-
     override fun start(context: Context) {
-        // 1. تحويل كافة طلبات ديسكورد الصادرة من التطبيق إلى v10 وحقن الـ Headers
+        // 1. حقن الـ Super Properties والـ User-Agent
         try {
             val setHeaderMethod = Http.Request::class.java.getDeclaredMethod("setHeader", String::class.java, String::class.java)
             patcher.patch(setHeaderMethod, Hook { param ->
                 val request = param.thisObject as? Http.Request ?: return@Hook
                 if (request.conn.url.host != "discord.com") return@Hook
-
-                upgradeUrlToV10(request.conn)
 
                 val headerKey = (param.args[0] as? String)?.lowercase() ?: return@Hook
                 when (headerKey) {
@@ -91,7 +70,6 @@ class ServerApplicationFix : Plugin() {
                 val request = param.result as? Http.Request ?: return@Hook
                 if (request.conn.url.host != "discord.com") return@Hook
 
-                upgradeUrlToV10(request.conn)
                 request.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
                 request.conn.setRequestProperty("X-Super-Properties", getSuperProperties())
             })
@@ -99,7 +77,14 @@ class ServerApplicationFix : Plugin() {
             logger.error("Failed to patch newDiscordRNRequest", t)
         }
 
-        // 2. الاستماع التلقائي المباشر لتغيير السيرفر للتحقق
+        // 2. الاستماع التلقائي المباشر لتغيير السيرفر مع تحديد الأنواع بدقة
+        //
+        // ملحوظة: subscribe(Action1) الحقيقية في هذه النسخة اسمها V (مش subscribe ولا u).
+        // تأكدنا من كده من rx/Observable.java نفسه:
+        //   public final Subscription V(Action1<? super T> action1)   <- subscribe(onNext)
+        //   public final Subscription W(Action1, Action1<Throwable>)  <- subscribe(onNext, onError)
+        // أما u(Action1) فبترجع Observable مش Subscription — دي doOnNext مش subscribe،
+        // يعني معملتش حاجة فعليًا لو استخدمناها.
         try {
             guildSelectedSubscription = StoreStream.getGuildSelected()
                 .observeSelectedGuildId()
@@ -115,6 +100,7 @@ class ServerApplicationFix : Plugin() {
                         val targetGuildIdLong = guildIdLong.toLong()
                         val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
 
+                        // إذا كان العضو بدون رتب أو في حالة معاينة يتم التحقق
                         if (member == null || member.roles.isEmpty()) {
                             checkAndTriggerApplication(guildId, isAuto = true)
                         }
@@ -126,13 +112,17 @@ class ServerApplicationFix : Plugin() {
             logger.error("Failed to subscribe to observeSelectedGuildId", e)
         }
 
-        // 2.5 اعتراض زر الانضمام ودوال الـ joinGuild
+        // 2.5 الطريقة الأدق: كل طرق الانضمام (رابط، زرار Join في رسالة، ...) بتمر على
+        // GuildJoinHelperKt.joinGuild(...) نفسها. بنعمل PreHook (قبل تنفيذ الأصلية) عشان
+        // نستبدل الـ onNext (اللي بينفّذ لما الانضمام ينجح فعليًا) بنسخة بتنادي الأصلية
+        // وبعدين تتحقق من التطبيق فورًا - مش مضطرين ننتظر أو نعتمد على تغيير السيرفر المختار.
         try {
             val joinGuildMethod = GuildJoinHelperKt::class.java.declaredMethods
                 .firstOrNull { it.name == "joinGuild" }
 
             if (joinGuildMethod == null) {
                 logger.error("ServerApplicationFix: joinGuild not found on GuildJoinHelperKt", null)
+                Utils.showToast("ServerApplicationFix: joinGuild not found, plugin needs an update.", false)
             } else {
                 val onNextIndex = joinGuildMethod.parameterCount - 1
                 patcher.patch(joinGuildMethod, PreHook { param ->
@@ -160,36 +150,13 @@ class ServerApplicationFix : Plugin() {
                         logger.error("Failed to wrap joinGuild onNext", e)
                     }
                 })
+                logger.info("ServerApplicationFix: patched GuildJoinHelperKt.joinGuild (onNext at index $onNextIndex)")
             }
         } catch (e: Throwable) {
             logger.error("Failed to patch GuildJoinHelperKt.joinGuild", e)
         }
 
-        // 2.6 اعتراض شاشة الـ Verification الأصلية ومنعها من تشغيل شاشة v9 الفاشلة
-        try {
-            val createMethod = WidgetMemberVerification.Companion::class.java.getDeclaredMethod(
-                "create",
-                Context::class.java,
-                Long::class.javaPrimitiveType,
-                String::class.java,
-                ModelInvite::class.java
-            )
-            patcher.patch(createMethod, PreHook { param ->
-                try {
-                    val guildIdLong = param.args[1] as Long
-                    val guildId = guildIdLong.toString()
-                    logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId")
-                    checkAndTriggerApplication(guildId, isAuto = false)
-                    param.setResult(null)
-                } catch (e: Throwable) {
-                    logger.error("Failed to intercept WidgetMemberVerification.create for guild", e)
-                }
-            })
-        } catch (e: Throwable) {
-            logger.error("Failed to patch WidgetMemberVerification.Companion.create", e)
-        }
-
-        // 3. خيار الـ Context Menu اليدوي
+        // 3. خيار الـ Context Menu اليدوي للسيرفر بأيقونة مضمونة التواجد
         val viewId = View.generateViewId()
         val verifyIcon = ContextCompat.getDrawable(Utils.appActivity, R.e.ic_mail_24dp)?.mutate()
             ?: ContextCompat.getDrawable(Utils.appActivity, android.R.drawable.ic_menu_agenda)?.mutate()
@@ -218,7 +185,7 @@ class ServerApplicationFix : Plugin() {
                     }
                     lay.addView(tw)
 
-                    tw.setOnClickListener {
+                    tw.setOnClickListener { v ->
                         lay.visibility = View.GONE
                         val guildId = validState.guild.id.toString()
                         checkAndTriggerApplication(guildId, isAuto = false)
@@ -227,7 +194,7 @@ class ServerApplicationFix : Plugin() {
             } catch (ignored: Exception) {}
         })
 
-        // 4. أمر الشات
+        // 4. أمر الشات اليدوي
         commands.registerCommand(
             "apply-verify",
             "Open Server Verification / Application Form",
@@ -274,6 +241,11 @@ class ServerApplicationFix : Plugin() {
         return encoded
     }
 
+    /**
+     * Uses ApplicationApi (our own spoofed requests) both to check whether a form exists AND
+     * to open our custom ApplicationPage — never Discord's native screen, since that uses the
+     * app's real, un-spoofed internal REST client and gets rejected on an outdated build.
+     */
     fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
         thread {
             try {
@@ -291,7 +263,7 @@ class ServerApplicationFix : Plugin() {
                 }
             } catch (e: ApplicationApiException) {
                 logger.error("member-verification check failed for guild $guildId: HTTP ${e.statusCode}", e)
-                if (!isAuto) Utils.showToast("No application required or unable to fetch.", false)
+                if (!isAuto) Utils.showToast("Failed to check: ${e.message}", false)
             } catch (e: Exception) {
                 logger.error("Auto check error for guild $guildId", e)
                 if (!isAuto) {
