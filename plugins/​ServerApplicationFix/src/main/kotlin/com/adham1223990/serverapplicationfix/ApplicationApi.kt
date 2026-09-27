@@ -40,24 +40,24 @@ object ApplicationApi {
         val version = root.optString("version", "1")
         val fieldsJson = root.optJSONArray("form_fields") ?: JSONArray()
         val fields = ArrayList<VerificationField>()
-        
         var i = 0
-        val len = fieldsJson.length()
-        while (i < len) {
+        while (i < fieldsJson.length()) {
             val f = fieldsJson.optJSONObject(i)
-            if (f != null) {
-                val fieldType = f.optString("field_type", "UNKNOWN")
-                fields.add(
-                    VerificationField(
-                        fieldType = fieldType,
-                        label = f.optString("label", ""),
-                        required = f.optBoolean("required", false),
-                        values = f.optJSONArray("values").toStringList(),
-                        choices = f.optJSONArray("choices").toStringList(),
-                        response = if (fieldType == "MULTIPLE_CHOICE") -1 else ""
-                    )
-                )
+            if (f == null) {
+                i++
+                continue
             }
+            val fieldType = f.optString("field_type", "UNKNOWN")
+            fields.add(
+                VerificationField(
+                    fieldType = fieldType,
+                    label = f.optString("label", ""),
+                    required = f.optBoolean("required", false),
+                    values = f.optJSONArray("values").toStringList(),
+                    choices = f.optJSONArray("choices").toStringList(),
+                    response = if (fieldType == "MULTIPLE_CHOICE") -1 else ""
+                )
+            )
             i++
         }
         return VerificationForm(version, fields)
@@ -65,10 +65,9 @@ object ApplicationApi {
 
     fun submitForm(guildId: String, form: VerificationForm) {
         val fieldsArr = JSONArray()
-        var i = 0
-        val len = form.fields.size
-        while (i < len) {
-            val field = form.fields[i]
+        var fi = 0
+        while (fi < form.fields.size) {
+            val field = form.fields[fi]
             fieldsArr.put(
                 JSONObject().apply {
                     put("field_type", field.fieldType)
@@ -79,7 +78,7 @@ object ApplicationApi {
                     put("response", field.response)
                 }
             )
-            i++
+            fi++
         }
         val body = JSONObject().apply {
             put("version", form.version)
@@ -105,6 +104,10 @@ object ApplicationApi {
         } catch (e: ApplicationApiException) {
             throw e
         } catch (t: Throwable) {
+            // Aliucord's Http.Request throws its own exception for non-2xx responses before we
+            // ever get to read the body ourselves, so its message is just the generic HTTP
+            // reason phrase (e.g. "403: Forbidden"), not Discord's actual JSON error. Pull the
+            // real body straight off the connection's error stream instead.
             val conn = req.conn
             val code = try { conn.responseCode } catch (e2: Throwable) { -1 }
             val errorBody = try {
@@ -123,18 +126,38 @@ object ApplicationApi {
 
         val req = Http.Request(fullUrl, method)
 
-        val token = currentAuthToken()
-        if (!token.isNullOrEmpty()) {
-            req.setHeader("Authorization", token)
+        try {
+            val token = currentAuthToken()
+            if (!token.isNullOrEmpty()) {
+                req.setHeader("Authorization", token)
+            }
+        } catch (t: Throwable) {
+            throw IllegalStateException("failed setting Authorization header: ${t.message}", t)
         }
 
-        req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
-        req.setHeader("X-Super-Properties", getSuperProperties())
-        req.setHeader("Accept-Language", Locale.getDefault().toLanguageTag())
+        try {
+            req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
+        } catch (t: Throwable) {
+            throw IllegalStateException("failed setting User-Agent header: ${t.message}", t)
+        }
+
+        try {
+            req.setHeader("X-Super-Properties", getSuperProperties())
+        } catch (t: Throwable) {
+            throw IllegalStateException("failed setting X-Super-Properties header: ${t.message}", t)
+        }
+
+        try {
+            req.setHeader("Accept-Language", Locale.getDefault().toLanguageTag())
+        } catch (t: Throwable) {
+            throw IllegalStateException("failed setting Accept-Language header: ${t.message}", t)
+        }
 
         return req
     }
 
+    /** Confirmed correct source (from a plugin that prints this exact value): the live app
+     *  token lives at RestAPI.AppHeadersProvider.INSTANCE.authToken, not on StoreAuthentication. */
     private fun currentAuthToken(): String? {
         return try {
             RestAPI.AppHeadersProvider.INSTANCE.authToken
@@ -181,8 +204,7 @@ object ApplicationApi {
         if (this == null) return emptyList()
         val out = ArrayList<String>()
         var i = 0
-        val len = length()
-        while (i < len) {
+        while (i < length()) {
             out.add(optString(i, ""))
             i++
         }
