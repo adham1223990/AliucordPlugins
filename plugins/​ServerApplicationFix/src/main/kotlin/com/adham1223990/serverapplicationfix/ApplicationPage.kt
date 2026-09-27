@@ -15,9 +15,6 @@ import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.fragments.SettingsPage
 
-/** Shows a guild's member-verification form and submits it through our own spoofed requests
- *  (see ApplicationApi.kt), instead of Discord's native screen which uses the app's real,
- *  un-spoofed internal REST client and therefore gets rejected on an outdated build. */
 class ApplicationPage(private val guildId: String) : SettingsPage() {
     private val logger = Logger("ServerApplicationFix")
 
@@ -81,21 +78,14 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
     }
 
     private fun renderForm(ctx: Context, f: VerificationForm) {
-        var fieldIdx = 0
-        val fieldsCount = f.fields.size
-        while (fieldIdx < fieldsCount) {
-            val field = f.fields[fieldIdx]
+        for (field in f.fields) {
             when (field.fieldType) {
                 "TERMS" -> {
-                    var valIdx = 0
-                    val valCount = field.values.size
-                    while (valIdx < valCount) {
-                        val rule = field.values[valIdx]
+                    for (rule in field.values) {
                         container.addView(TextView(ctx).apply {
                             text = rule
                             setPadding(32, 8, 32, 8)
                         })
-                        valIdx++
                     }
                     container.addView(CheckBox(ctx).apply {
                         text = if (field.required) "I have read and agree (required)" else "I have read and agree"
@@ -132,25 +122,20 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                         setPadding(32, 16, 32, 4)
                     })
                     val group = RadioGroup(ctx).apply { orientation = RadioGroup.VERTICAL }
-                    var choiceIdx = 0
-                    val choicesCount = field.choices.size
-                    while (choiceIdx < choicesCount) {
-                        val choice = field.choices[choiceIdx]
+                    for (choice in field.choices) {
                         group.addView(RadioButton(ctx).apply {
                             text = choice
                             id = View.generateViewId()
                         })
-                        choiceIdx++
                     }
                     group.setOnCheckedChangeListener { rg, checkedId ->
-                        var childIdx = 0
-                        val count = rg.childCount
-                        while (childIdx < count) {
-                            if (rg.getChildAt(childIdx).id == checkedId) {
-                                field.response = childIdx
+                        var i = 0
+                        while (i < rg.childCount) {
+                            if (rg.getChildAt(i).id == checkedId) {
+                                field.response = i
                                 break
                             }
-                            childIdx++
+                            i++
                         }
                     }
                     container.addView(group)
@@ -164,7 +149,6 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                     })
                 }
             }
-            fieldIdx++
         }
 
         container.addView(Button(ctx).apply {
