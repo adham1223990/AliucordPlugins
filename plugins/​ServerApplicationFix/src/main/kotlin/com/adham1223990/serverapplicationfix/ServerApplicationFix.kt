@@ -145,7 +145,7 @@ class ServerApplicationFix : Plugin() {
                     val guildId = guildIdLong.toString()
                     val inviteCode = inviteCodeOf(param.args[3] as? ModelInvite)
                     if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
-                    val inviteGuildName = (param.args[3] as? ModelInvite)?.guild?.name
+                    val inviteGuildName = (param.args[3] as? ModelInvite)?.guild?.getName()
                     if (!inviteGuildName.isNullOrEmpty()) ApplicationApi.guildNames[guildId] = inviteGuildName
                     logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId (invite: $inviteCode)")
                     checkAndTriggerApplication(guildId, isAuto = false)
@@ -228,10 +228,10 @@ class ServerApplicationFix : Plugin() {
         return try {
             if (ApplicationApi.appliedGuilds.contains(guildId)) return true
             val gid = guildId.toLong()
-            val meId = StoreStream.getUsers().meSnapshot.id
+            val meId = StoreStream.getUsers().getMeSnapshot().getId()
             val member = StoreStream.getGuilds().getMember(gid, meId)
-            if (member != null && !member.pending) return true
-            val status = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.applicationStatus
+            if (member != null && !member.getPending()) return true
+            val status = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.getApplicationStatus()
             status != null && status.name != "STARTED" && status.name != "UNKNOWN"
         } catch (t: Throwable) {
             logger.error("shouldSkipAuto failed for guild $guildId", t)
