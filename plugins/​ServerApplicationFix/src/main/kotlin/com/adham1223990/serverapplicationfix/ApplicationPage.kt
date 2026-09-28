@@ -202,7 +202,7 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
             return
         }
         submitting = true
-        Utils.showToast("Submitting application…")
+        Utils.showToast("Submitting…")
 
         Utils.threadPool.execute {
             val result = runCatching { ApplicationApi.submitForm(guildId, f) }
@@ -211,7 +211,11 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                 result
                     .onSuccess { status ->
                         ApplicationApi.appliedGuilds.add(guildId)
-                        Utils.showToast("Application submitted! Status: ${ApplicationApi.statusLabel(status)}", true)
+                        if (status == "DONE") {
+                            Utils.showToast("Done!", true)
+                        } else {
+                            Utils.showToast("Application submitted! Status: ${ApplicationApi.statusLabel(status)}", true)
+                        }
                         runCatching {
                             val act = activity
                             if (act != null) act.finish() else parentFragmentManager.popBackStack()
