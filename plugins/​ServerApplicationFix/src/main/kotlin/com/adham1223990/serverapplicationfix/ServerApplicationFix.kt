@@ -32,10 +32,16 @@ import kotlin.concurrent.thread
 @Suppress("unused")
 class ServerApplicationFix : Plugin() {
 
+    init {
+        settingsTab = SettingsTab(ApplicationsSettingsPage::class.java).withArgs(settings)
+    }
+
     private val checkedGuilds = HashSet<String>()
     private var guildSelectedSubscription: Subscription? = null
 
     override fun start(context: Context) {
+        ApplicationStore.init(settings)
+
         // الطلبات بتتبعت عن طريق ApplicationApi باستخدام Http.Request.newDiscordRNRequest
         // الرسمية، فمفيش هنا أي hooks على الهيدرز ولا تزوير للـ User-Agent أو الـ Super Properties.
 
@@ -139,6 +145,8 @@ class ServerApplicationFix : Plugin() {
                     val guildId = guildIdLong.toString()
                     val inviteCode = inviteCodeOf(param.args[3] as? ModelInvite)
                     if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
+                    val inviteGuildName = (param.args[3] as? ModelInvite)?.guild?.name
+                    if (!inviteGuildName.isNullOrEmpty()) ApplicationApi.guildNames[guildId] = inviteGuildName
                     logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId (invite: $inviteCode)")
                     checkAndTriggerApplication(guildId, isAuto = false)
                     param.setResult(null)
@@ -212,6 +220,25 @@ class ServerApplicationFix : Plugin() {
         checkedGuilds.clear()
     }
 
+    /**
+     * true لو مفيش داعي نعرض التقديم تلقائيًا: المستخدم عضو كامل (مش pending)، أو قدّم فعلاً
+     * (طلبه PENDING/REJECTED/APPROVED)، أو قدّمنا بنجاح في الجلسة دي.
+     */
+    private fun shouldSkipAuto(guildId: String): Boolean {
+        return try {
+            if (ApplicationApi.appliedGuilds.contains(guildId)) return true
+            val gid = guildId.toLong()
+            val meId = StoreStream.getUsers().meSnapshot.id
+            val member = StoreStream.getGuilds().getMember(gid, meId)
+            if (member != null && !member.pending) return true
+            val status = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.applicationStatus
+            status != null && status.name != "STARTED" && status.name != "UNKNOWN"
+        } catch (t: Throwable) {
+            logger.error("shouldSkipAuto failed for guild $guildId", t)
+            false
+        }
+    }
+
     /** يجيب كود الدعوة من ModelInvite بالـ reflection (حقل code أو getCode) عشان منعتمدش على اسم ثابت. */
     private fun inviteCodeOf(invite: ModelInvite?): String? {
         if (invite == null) return null
@@ -240,10 +267,29 @@ class ServerApplicationFix : Plugin() {
     fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
         thread {
             try {
+                // التشغيل التلقائي مايتعملش لو المستخدم عضو كامل أو قدّم قبل كده — نفس منطق
+                // MemberVerificationUtils.maybeShowVerificationGate في التطبيق الأصلي.
+                if (isAuto && shouldSkipAuto(guildId)) return@thread
+
                 val form = ApplicationApi.fetchForm(guildId)
 
                 if (form.fields.isEmpty()) {
                     if (!isAuto) Utils.showToast("No active application for this server.", false)
+                    return@thread
+                }
+
+                // حماية من التكرار عن طريق API ديسكورد: لو فيه طلب موجود فعلاً منفتحش الفورم
+                val existing = ApplicationApi.fetchJoinRequest(guildId)
+                if (existing != null && ApplicationApi.isFinalStatus(existing.status)) {
+                    ApplicationStore.record(guildId, ApplicationApi.guildNames[guildId], existing.status)
+                    ApplicationApi.appliedGuilds.add(guildId)
+                    checkedGuilds.add(guildId)
+                    if (!isAuto) {
+                        Utils.showToast(
+                            "You already applied to this server (${ApplicationApi.statusLabel(existing.status)}).",
+                            true
+                        )
+                    }
                     return@thread
                 }
 
