@@ -87,6 +87,7 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                 })
                 container.addView(Button(ctx).apply {
                     text = "Retry"
+                    styleWhite()
                     setOnClickListener { reload(useCached = false) }
                 })
             }
@@ -179,6 +180,7 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
 
         container.addView(Button(ctx).apply {
             text = "Submit Application"
+            styleWhite()
             isEnabled = !submitting
             setOnClickListener {
                 val missing = f.fields.any {
@@ -195,6 +197,10 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
 
     private fun submit(f: VerificationForm) {
         if (submitting) return
+        if (ApplicationApi.appliedGuilds.contains(guildId)) {
+            Utils.showToast("You already applied to this server.", true)
+            return
+        }
         submitting = true
         Utils.showToast("Submitting application…")
 
@@ -202,16 +208,27 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
             val result = runCatching { ApplicationApi.submitForm(guildId, f) }
             Utils.mainThread.post {
                 submitting = false
-                if (!isAdded) return@post
                 result
-                    .onSuccess {
-                        Utils.showToast("Application submitted!")
-                        parentFragmentManager.popBackStack()
+                    .onSuccess { status ->
+                        ApplicationApi.appliedGuilds.add(guildId)
+                        Utils.showToast("Application submitted! Status: ${ApplicationApi.statusLabel(status)}", true)
+                        runCatching {
+                            val act = activity
+                            if (act != null) act.finish() else parentFragmentManager.popBackStack()
+                        }
                     }
                     .onFailure {
-                        logger.error("Failed to submit application for guild $guildId", it)
-                        Utils.showToast("Failed to submit: ${it.message}", true)
-                        render()
+                        if (it is AlreadyAppliedException) {
+                            Utils.showToast(it.message ?: "You already applied to this server.", true)
+                            runCatching {
+                                val act = activity
+                                if (act != null) act.finish() else parentFragmentManager.popBackStack()
+                            }
+                        } else {
+                            logger.error("Failed to submit application for guild $guildId", it)
+                            Utils.showToast("Failed to submit: ${it.message}", true)
+                            runCatching { render() }
+                        }
                     }
             }
         }
