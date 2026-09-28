@@ -93,12 +93,11 @@ object ApplicationApi {
     }
 
     /**
-     * True لو الحالة دي معناها إن التقديم لسه "شغال" ولازم يمنع تقديم جديد (قيد المراجعة أو مرفوض).
-     * APPROVED مش بتمنع: لو اتقبلت وبعدين خرجت/اتطردت، طلب القبول القديم بيفضل عند ديسكورد،
-     * ولو منعنا بسببه مش هتقدر تقدم تاني أبدًا.
+     * True لو الحالة دي معناها إن فيه طلب شغال فعلاً ولازم يمنع تقديم جديد: PENDING بس.
+     * APPROVED (اتقبلت ثم خرجت) و REJECTED (اترفضت) مابيمنعوش: ديسكورد نفسه بيسمح بإعادة
+     * التقديم بعد الرفض، والقرار النهائي للسيرفر — لو رفض الطلب هيرجع رسالة الخطأ ونعرضها.
      */
-    fun isFinalStatus(status: String): Boolean =
-        status == "PENDING" || status == "REJECTED"
+    fun isFinalStatus(status: String): Boolean = status == "PENDING"
 
     /**
      * Asks Discord directly (GET /guilds/{id}/requests/@me) for this user's join request.
