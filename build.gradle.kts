@@ -1,5 +1,3 @@
-import com.aliucord.gradle.AliucordExtension
-
 import com.android.build.gradle.LibraryExtension
 
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -22,13 +20,8 @@ subprojects {
     pluginManager.apply(libs.plugins.android.library.get().pluginId)
     pluginManager.apply(libs.plugins.kotlin.android.get().pluginId)
 
-    configure<AliucordExtension> {
-        author("canny1913", 1264872702821273633L, hyperlink = true)
-        github("https://github.com/canny1913/AliucordPlugins")
-    }
-
     configure<LibraryExtension> {
-        namespace = "com.github.canny1913"
+        namespace = "com.aliucord.plugins"
         compileSdk = 36
 
         defaultConfig {
