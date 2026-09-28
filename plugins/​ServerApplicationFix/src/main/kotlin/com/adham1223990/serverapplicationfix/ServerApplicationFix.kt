@@ -37,6 +37,14 @@ class ServerApplicationFix : Plugin() {
     }
 
     private val checkedGuilds = HashSet<String>()
+
+    /** استدعاء WidgetMemberVerification.create الأصلي المحفوظ، عشان نشغّله لو الفورم مجرد قوانين. */
+    private class NativeCall(val method: java.lang.reflect.Method, val target: Any?, val args: Array<Any?>)
+
+    private val nativeCalls = java.util.concurrent.ConcurrentHashMap<String, NativeCall>()
+
+    @Volatile
+    private var bypassNative = false
     private var guildSelectedSubscription: Subscription? = null
 
     override fun start(context: Context) {
@@ -141,8 +149,12 @@ class ServerApplicationFix : Plugin() {
             )
             patcher.patch(createMethod, PreHook { param ->
                 try {
+                    if (bypassNative) return@PreHook
                     val guildIdLong = param.args[1] as Long
                     val guildId = guildIdLong.toString()
+                    // عضو كامل: مانتدخلش خالص (مفيش تقديم يتعرض)
+                    if (ApplicationApi.isFullMember(guildId)) return@PreHook
+                    nativeCalls[guildId] = NativeCall(createMethod, param.thisObject, param.args.copyOf())
                     val inviteCode = inviteCodeOf(param.args[3] as? ModelInvite)
                     if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
                     val inviteGuildName = guildNameOf(param.args[3] as? ModelInvite)
@@ -218,6 +230,7 @@ class ServerApplicationFix : Plugin() {
         guildSelectedSubscription?.unsubscribe()
         guildSelectedSubscription = null
         checkedGuilds.clear()
+        nativeCalls.clear()
     }
 
     /**
@@ -290,6 +303,9 @@ class ServerApplicationFix : Plugin() {
                 // MemberVerificationUtils.maybeShowVerificationGate في التطبيق الأصلي.
                 if (isAuto && shouldSkipAuto(guildId)) return@thread
 
+                // عضو كامل: مفيش تقديم يتعرض ولا توست
+                if (ApplicationApi.isFullMember(guildId)) return@thread
+
                 val form = ApplicationApi.fetchForm(guildId)
 
                 if (form.fields.isEmpty()) {
@@ -297,8 +313,29 @@ class ServerApplicationFix : Plugin() {
                     return@thread
                 }
 
+                // فورم قوانين بس (TERMS): مش تقديم
+                val isApplication = ApplicationApi.isApplicationForm(form)
+                val native = nativeCalls.remove(guildId)
+                if (!isApplication) {
+                    // مش تقديم: صفحة البلوقن ماتظهرش أبدًا. لو الاستدعاء جاي من شاشة ديسكورد
+                    // الأصلية نشغّلها، وغير كده ماتعملش حاجة.
+                    if (native == null) return@thread
+                    Handler(Looper.getMainLooper()).post {
+                        try {
+                            bypassNative = true
+                            native.method.isAccessible = true
+                            native.method.invoke(native.target, *native.args)
+                        } catch (t: Throwable) {
+                            logger.error("Failed to run native verification for guild $guildId", t)
+                        } finally {
+                            bypassNative = false
+                        }
+                    }
+                    return@thread
+                }
+
                 // حماية من التكرار عن طريق API ديسكورد: لو فيه طلب موجود فعلاً منفتحش الفورم
-                val existing = ApplicationApi.fetchJoinRequest(guildId)
+                val existing = if (isApplication) ApplicationApi.fetchJoinRequest(guildId) else null
                 if (existing != null && ApplicationApi.isFinalStatus(existing.status)) {
                     ApplicationStore.record(guildId, ApplicationApi.guildNames[guildId], existing.status)
                     ApplicationApi.appliedGuilds.add(guildId)
