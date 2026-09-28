@@ -196,12 +196,35 @@ object ApplicationApi {
             put("version", form.version)
             put("form_fields", fieldsArr)
         }
-        val response = request("/guilds/$guildId/requests/@me", "PUT", body)
+        val response = putWithInviteFallback(guildId, body)
         val raw = response.optString("application_status", "")
         val status = if (isBlankSafe(raw)) "PENDING" else normalizeStatus(raw)
         val finalStatus = if (status == "UNKNOWN" || status == "STARTED") "PENDING" else status
         ApplicationStore.record(guildId, guildNames[guildId], finalStatus)
         return finalStatus
+    }
+
+    /**
+     * 403 / 50001 (Missing Access) معناه غالبًا إن المستخدم لسه مش عضو في السيرفر (الدعوة ما اتقبلتش
+     * لأن الـ hook منع شاشة الـ verification الأصلية). في الحالة دي نجرب الأول نمرر invite_code في
+     * الطلب، ولو لسه فاشل نقبل الدعوة (POST /invites/{code}) ونعيد المحاولة.
+     */
+    private fun putWithInviteFallback(guildId: String, body: JSONObject): JSONObject {
+        val path = "/guilds/$guildId/requests/@me"
+        try {
+            return request(path, "PUT", body)
+        } catch (e: ApplicationApiException) {
+            val code = inviteCodes[guildId]
+            if (e.statusCode != 403 || code.isNullOrEmpty()) throw e
+            val encoded = URLEncoder.encode(code, "UTF-8")
+            try {
+                return request("$path?invite_code=$encoded", "PUT", body)
+            } catch (e2: ApplicationApiException) {
+                if (e2.statusCode != 403) throw e2
+            }
+            request("/invites/$encoded", "POST", JSONObject())
+            return request(path, "PUT", body)
+        }
     }
 
     // بدائل يدوية للـ isBlank()/take() لأنها بتستخدم IntRange iterator داخليًا وبتتعارض مع
