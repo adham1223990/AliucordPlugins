@@ -4,19 +4,16 @@ import android.app.Activity
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 
-import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.PreHook
-import com.aliucord.utils.RNSuperProperties
 
 import com.discord.databinding.WidgetGuildContextMenuBinding
 import com.discord.models.domain.ModelInvite
@@ -28,7 +25,6 @@ import com.discord.widgets.servers.member_verification.WidgetMemberVerification
 
 import com.lytefast.flexinput.R
 import kotlin.jvm.functions.Function1
-import org.json.JSONObject
 import rx.Subscription
 import kotlin.concurrent.thread
 
@@ -36,23 +32,12 @@ import kotlin.concurrent.thread
 @Suppress("unused")
 class ServerApplicationFix : Plugin() {
 
-    companion object {
-        const val CURRENT_RN_BUILD_NUMBER = 6081
-        const val CURRENT_RN_VERSION_CODE = 341200
-        const val CURRENT_RN_VERSION = "341.0 - rn"
-        const val CURRENT_RN_USER_AGENT = "Discord-Android/$CURRENT_RN_VERSION_CODE;RNA"
-    }
-
-    private var cachedSuperProps: String? = null
     private val checkedGuilds = HashSet<String>()
     private var guildSelectedSubscription: Subscription? = null
 
     override fun start(context: Context) {
-        // ملحوظة: كنا هنا بنعمل Hook عام على Http.Request.setHeader / newDiscordRNRequest
-        // عشان نحقن الـ User-Agent/X-Super-Properties على أي request لـ discord.com. اتشالت
-        // دلوقتي لأنها بقت مش لازمة (ApplicationApi.createV10Request بتحط هيدراتها بنفسها
-        // مباشرة)، وكانت بتتفعّل بشكل غير متوقع حتى على الـ requests بتاعتنا احنا نفسها كل
-        // مرة بننده فيها req.setHeader(...)، وده كان سبب الكراش الغريب (IntIterator).
+        // الطلبات بتتبعت عن طريق ApplicationApi باستخدام Http.Request.newDiscordRNRequest
+        // الرسمية، فمفيش هنا أي hooks على الهيدرز ولا تزوير للـ User-Agent أو الـ Super Properties.
 
         // 2. الاستماع التلقائي المباشر لتغيير السيرفر مع تحديد الأنواع بدقة
         //
@@ -229,31 +214,9 @@ class ServerApplicationFix : Plugin() {
         return Utils.appActivity
     }
 
-    private fun getSuperProperties(): String {
-        cachedSuperProps?.let { return it }
-        val props = try {
-            JSONObject(RNSuperProperties.superProperties.toString())
-        } catch (t: Throwable) {
-            JSONObject()
-        }
-
-        props.put("has_client_mods", false)
-        props.put("os", "Android")
-        props.put("browser", "Discord Android")
-        props.put("client_version", CURRENT_RN_VERSION)
-        props.put("release_channel", "canaryRelease")
-        props.put("client_build_number", CURRENT_RN_BUILD_NUMBER)
-        props.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
-
-        val encoded = Base64.encodeToString(props.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        cachedSuperProps = encoded
-        return encoded
-    }
-
     /**
-     * Uses ApplicationApi (our own spoofed requests) both to check whether a form exists AND
-     * to open our custom ApplicationPage — never Discord's native screen, since that uses the
-     * app's real, un-spoofed internal REST client and gets rejected on an outdated build.
+     * Uses ApplicationApi (official Aliucord RN requests) both to check whether a form exists
+     * AND to open our custom ApplicationPage instead of Discord's native verification screen.
      */
     fun checkAndTriggerApplication(guildId: String, isAuto: Boolean) {
         thread {
