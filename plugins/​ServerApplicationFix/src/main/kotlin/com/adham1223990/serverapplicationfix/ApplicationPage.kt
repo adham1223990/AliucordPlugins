@@ -1,6 +1,7 @@
 package com.adham1223990.serverapplicationfix
 
 import android.content.Context
+import android.graphics.Color
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
@@ -32,21 +33,36 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
         reload()
     }
 
-    private fun reload() {
-        loading = true
+    private fun reload(useCached: Boolean = true) {
         error = null
+        val cached = if (useCached) ApplicationApi.prefetchedForms.remove(guildId) else null
+        if (cached != null) {
+            form = cached
+            loading = false
+            render()
+            return
+        }
+
+        loading = true
         render()
         Utils.threadPool.execute {
             val result = runCatching { ApplicationApi.fetchForm(guildId) }
             Utils.mainThread.post {
-                if (!isAdded) return@post
+                if (!::container.isInitialized) return@post
                 loading = false
                 result.onSuccess { form = it }
                     .onFailure {
                         logger.error("Failed to load application form for guild $guildId", it)
                         error = it.message ?: it.toString()
                     }
-                render()
+                try {
+                    render()
+                } catch (t: Throwable) {
+                    logger.error("Failed to render application form for guild $guildId", t)
+                    error = "Render error: ${t.message}"
+                    loading = false
+                    render()
+                }
             }
         }
     }
@@ -59,17 +75,19 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
         when {
             loading -> container.addView(TextView(ctx).apply {
                 text = "Loading application…"
+                setTextColor(Color.WHITE)
                 setPadding(32, 32, 32, 32)
             })
 
             error != null -> {
                 container.addView(TextView(ctx).apply {
                     text = "Failed to load the application:\n$error"
+                    setTextColor(Color.WHITE)
                     setPadding(32, 32, 32, 16)
                 })
                 container.addView(Button(ctx).apply {
                     text = "Retry"
-                    setOnClickListener { reload() }
+                    setOnClickListener { reload(useCached = false) }
                 })
             }
 
@@ -84,11 +102,13 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                     for (rule in field.values) {
                         container.addView(TextView(ctx).apply {
                             text = rule
+                            setTextColor(Color.WHITE)
                             setPadding(32, 8, 32, 8)
                         })
                     }
                     container.addView(CheckBox(ctx).apply {
                         text = if (field.required) "I have read and agree (required)" else "I have read and agree"
+                        setTextColor(Color.WHITE)
                         setPadding(32, 8, 32, 8)
                         setOnCheckedChangeListener { _, checked ->
                             field.response = if (checked) "true" else "false"
@@ -99,9 +119,12 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                 "TEXT_INPUT", "PARAGRAPH" -> {
                     container.addView(TextView(ctx).apply {
                         text = if (field.required) "${field.label} *" else field.label
+                        setTextColor(Color.WHITE)
                         setPadding(32, 16, 32, 4)
                     })
                     container.addView(EditText(ctx).apply {
+                        setTextColor(Color.WHITE)
+                        setHintTextColor(Color.LTGRAY)
                         if (field.fieldType == "PARAGRAPH") {
                             isSingleLine = false
                             minLines = 3
@@ -119,12 +142,14 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                 "MULTIPLE_CHOICE" -> {
                     container.addView(TextView(ctx).apply {
                         text = if (field.required) "${field.label} *" else field.label
+                        setTextColor(Color.WHITE)
                         setPadding(32, 16, 32, 4)
                     })
                     val group = RadioGroup(ctx).apply { orientation = RadioGroup.VERTICAL }
                     for (choice in field.choices) {
                         group.addView(RadioButton(ctx).apply {
                             text = choice
+                            setTextColor(Color.WHITE)
                             id = View.generateViewId()
                         })
                     }
@@ -145,6 +170,7 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                     container.addView(TextView(ctx).apply {
                         text = "${field.label}\n(Unsupported field type: ${field.fieldType}. " +
                             "Please use the official Discord app for this field.)"
+                        setTextColor(Color.WHITE)
                         setPadding(32, 16, 32, 16)
                     })
                 }
