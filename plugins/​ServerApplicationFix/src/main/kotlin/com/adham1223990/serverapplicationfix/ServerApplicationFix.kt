@@ -248,6 +248,7 @@ class ServerApplicationFix : Plugin() {
                 }
 
                 checkedGuilds.add(guildId)
+                ApplicationApi.prefetchedForms[guildId] = form
 
                 Handler(Looper.getMainLooper()).post {
                     Utils.openPageWithProxy(getSafeActivity(), ApplicationPage(guildId))
