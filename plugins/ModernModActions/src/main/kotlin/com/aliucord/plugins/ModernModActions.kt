@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
-import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -22,10 +21,7 @@ import com.discord.widgets.user.profile.UserProfileAdminView
 import com.discord.widgets.user.usersheet.WidgetUserSheet
 import org.json.JSONArray
 import org.json.JSONObject
-import java.lang.reflect.Field
 import java.lang.reflect.Method
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -42,8 +38,6 @@ class ModernModActions : Plugin() {
     }
 
     companion object {
-        private const val CURRENT_RN_USER_AGENT = "Discord-Android/225017;RNA"
-
         // Discord Color Palette
         private const val COLOR_BG_POPUP = 0xFF313338.toInt()
         private const val COLOR_INPUT_BG = 0xFF1E1F22.toInt()
@@ -55,7 +49,6 @@ class ModernModActions : Plugin() {
 
     @Volatile private var activeUserId: Long = 0L
     @Volatile private var activeGuildId: Long = 0L
-    private var cachedSuperProperties: String? = null
 
     // ==========================================================
     // UI Helpers (مطابقة لديسكورد تماماً)
@@ -254,56 +247,13 @@ class ModernModActions : Plugin() {
     }
 
     // ==========================================================
-    // v10 request & spoofing
+    // Request (official Aliucord RN request)
     // ==========================================================
 
-    private fun currentSuperProperties(): String {
-        cachedSuperProperties?.let { return it }
-        return synchronized(this) {
-            cachedSuperProperties ?: buildCurrentSuperProperties().also { cachedSuperProperties = it }
-        }
-    }
-
-    private fun buildCurrentSuperProperties(): String {
-        val properties = JSONObject().apply {
-            put("os", "Android")
-            put("browser", "Discord Android")
-            put("device", android.os.Build.MODEL)
-            put("system_locale", Locale.getDefault().toLanguageTag())
-            put("client_version", "225.17 - rn")
-            put("release_channel", "googleRelease")
-            put("client_build_number", 225017)
-            put("native_build_number", 4320)
-            put("has_client_mods", false)
-            put("os_version", android.os.Build.VERSION.RELEASE)
-            put("os_sdk_version", android.os.Build.VERSION.SDK_INT.toString())
-            put("device_manufacturer", android.os.Build.MANUFACTURER)
-            put("device_model", android.os.Build.MODEL)
-            put("design_id", 0)
-            put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
-        }
-        return Base64.encodeToString(properties.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-    }
-
-    private fun createV10Request(path: String, method: String): Http.Request {
-        val req = Http.Request.newDiscordRequest(path, method)
-        try {
-            val conn = req.conn
-            val originalUrl = conn.url.toString()
-            if (originalUrl.contains("/api/v9/")) {
-                val upgradedUrl = originalUrl.replace("/api/v9/", "/api/v10/")
-                val urlField: Field = HttpURLConnection::class.java.getDeclaredField("url")
-                urlField.isAccessible = true
-                urlField.set(conn, URL(upgradedUrl))
-            }
-        } catch (t: Throwable) {
-            logger.error("Failed to upgrade endpoint to v10", t)
-        }
-
-        req.conn.setRequestProperty("User-Agent", CURRENT_RN_USER_AGENT)
-        req.conn.setRequestProperty("X-Super-Properties", currentSuperProperties())
-        return req
-    }
+    // الطريقة الرسمية: newDiscordRNRequest بتبني الـ route والـ Authorization وهيدرز الـ RN
+    // بنفسها، فمفيش تزوير للـ User-Agent/Super Properties ولا reflection على الـ URL.
+    private fun createV10Request(path: String, method: String): Http.Request =
+        Http.Request.newDiscordRNRequest(path, method)
 
     // ==========================================================
     // Hooks & Core Logic
