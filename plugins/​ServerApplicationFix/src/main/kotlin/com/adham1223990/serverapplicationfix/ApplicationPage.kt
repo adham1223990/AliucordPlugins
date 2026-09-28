@@ -33,6 +33,29 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
         reload()
     }
 
+    /** يقفل الصفحة: الأول بإنهاء الـ Activity الحاملة لها، ولو مش متاحة بنرجع خطوة في الـ back stack. */
+    private fun closePage() {
+        try {
+            val act = activity
+            if (act != null && !act.isFinishing) {
+                act.finish()
+                return
+            }
+        } catch (t: Throwable) {
+            logger.error("Failed to finish activity", t)
+        }
+        try {
+            parentFragmentManager.popBackStack()
+        } catch (t: Throwable) {
+            logger.error("Failed to pop back stack", t)
+        }
+    }
+
+    override fun onDestroy() {
+        ApplicationApi.openPages.remove(guildId)
+        super.onDestroy()
+    }
+
     private fun reload(useCached: Boolean = true) {
         error = null
         val cached = if (useCached) ApplicationApi.prefetchedForms.remove(guildId) else null
@@ -197,10 +220,8 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
 
     private fun submit(f: VerificationForm) {
         if (submitting) return
-        if (ApplicationApi.appliedGuilds.contains(guildId)) {
-            Utils.showToast("You already applied to this server.", true)
-            return
-        }
+        // مفيش فحص على appliedGuilds هنا: ممكن يكون قديم (اتقبلت ثم خرجت). submitForm بيسأل
+        // ديسكورد مباشرة وبيرفض بس لو الطلب فعلاً قيد المراجعة أو مرفوض.
         submitting = true
         Utils.showToast("Submitting…")
 
@@ -216,18 +237,12 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                         } else {
                             Utils.showToast("Application submitted! Status: ${ApplicationApi.statusLabel(status)}", true)
                         }
-                        runCatching {
-                            val act = activity
-                            if (act != null) act.finish() else parentFragmentManager.popBackStack()
-                        }
+                        closePage()
                     }
                     .onFailure {
                         if (it is AlreadyAppliedException) {
                             Utils.showToast(it.message ?: "You already applied to this server.", true)
-                            runCatching {
-                                val act = activity
-                                if (act != null) act.finish() else parentFragmentManager.popBackStack()
-                            }
+                            closePage()
                         } else {
                             logger.error("Failed to submit application for guild $guildId", it)
                             Utils.showToast("Failed to submit: ${it.message}", true)
