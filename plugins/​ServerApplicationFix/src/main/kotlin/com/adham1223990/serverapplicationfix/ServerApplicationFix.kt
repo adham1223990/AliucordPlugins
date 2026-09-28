@@ -137,7 +137,9 @@ class ServerApplicationFix : Plugin() {
                 try {
                     val guildIdLong = param.args[1] as Long
                     val guildId = guildIdLong.toString()
-                    logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId")
+                    val inviteCode = inviteCodeOf(param.args[3] as? ModelInvite)
+                    if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
+                    logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId (invite: $inviteCode)")
                     checkAndTriggerApplication(guildId, isAuto = false)
                     param.setResult(null)
                 } catch (e: Throwable) {
@@ -208,6 +210,23 @@ class ServerApplicationFix : Plugin() {
         guildSelectedSubscription?.unsubscribe()
         guildSelectedSubscription = null
         checkedGuilds.clear()
+    }
+
+    /** يجيب كود الدعوة من ModelInvite بالـ reflection (حقل code أو getCode) عشان منعتمدش على اسم ثابت. */
+    private fun inviteCodeOf(invite: ModelInvite?): String? {
+        if (invite == null) return null
+        try {
+            val f = ModelInvite::class.java.getDeclaredField("code")
+            f.isAccessible = true
+            val v = f.get(invite) as? String
+            if (!v.isNullOrEmpty()) return v
+        } catch (t: Throwable) {
+        }
+        return try {
+            ModelInvite::class.java.getMethod("getCode").invoke(invite) as? String
+        } catch (t: Throwable) {
+            null
+        }
     }
 
     private fun getSafeActivity(): Activity {
