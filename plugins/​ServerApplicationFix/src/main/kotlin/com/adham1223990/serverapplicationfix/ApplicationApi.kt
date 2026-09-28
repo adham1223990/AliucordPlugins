@@ -27,6 +27,9 @@ object ApplicationApi {
      */
     val inviteCodes = ConcurrentHashMap<String, String>()
 
+    /** الفورم اللي الـ hook جابه خلاص، عشان الصفحة متعملش طلب تاني (بتاخده مرة واحدة). */
+    val prefetchedForms = ConcurrentHashMap<String, VerificationForm>()
+
     fun fetchForm(guildId: String): VerificationForm {
         val code = inviteCodes[guildId]
         val query = if (!code.isNullOrEmpty()) {
