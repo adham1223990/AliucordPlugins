@@ -76,6 +76,9 @@ class ServerApplicationFix : Plugin() {
                         val targetGuildIdLong = guildIdLong.toLong()
                         val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
 
+                        // عضو كامل: امسح أي حالة قديمة (لو اتطردت/خرجت بعدين ورجعت تقدم تاني)
+                        if (member != null && !member.getPending()) clearGuildState(guildId)
+
                         // إذا كان العضو بدون رتب أو في حالة معاينة يتم التحقق
                         if (member == null || member.roles.isEmpty()) {
                             checkAndTriggerApplication(guildId, isAuto = true)
@@ -231,6 +234,7 @@ class ServerApplicationFix : Plugin() {
         guildSelectedSubscription = null
         checkedGuilds.clear()
         nativeCalls.clear()
+        ApplicationApi.openPages.clear()
     }
 
     /**
@@ -239,17 +243,39 @@ class ServerApplicationFix : Plugin() {
      */
     private fun shouldSkipAuto(guildId: String): Boolean {
         return try {
-            if (ApplicationApi.appliedGuilds.contains(guildId)) return true
             val gid = guildId.toLong()
             val meId = StoreStream.getUsers().me.id
             val member = StoreStream.getGuilds().getMember(gid, meId)
-            if (member != null && !member.getPending()) return true
-            val statusName = ApplicationApi.joinRequestStatusName(gid)
-            statusName != null && statusName != "STARTED" && statusName != "UNKNOWN"
+            if (member != null && !member.getPending()) {
+                clearGuildState(guildId)
+                return true
+            }
+
+            // الحالة المحلية ممكن تكون قديمة، فلو قالت "مقدّم" نتأكد من ديسكورد نفسه.
+            val localName = ApplicationApi.joinRequestStatusName(gid)
+            val local = if (localName != null) ApplicationApi.normalizeStatus(localName) else null
+            val looksApplied = ApplicationApi.appliedGuilds.contains(guildId) ||
+                (local != null && ApplicationApi.isFinalStatus(local))
+            if (!looksApplied) return false
+
+            val remote = ApplicationApi.fetchJoinRequest(guildId)
+            val effective = if (remote != null) remote.status else local
+            if (effective != null && ApplicationApi.isFinalStatus(effective)) return true
+
+            // الطلب القديم خلص (مثلاً اتقبلت ثم خرجت): نسمح بتقديم جديد.
+            ApplicationApi.appliedGuilds.remove(guildId)
+            false
         } catch (t: Throwable) {
             logger.error("shouldSkipAuto failed for guild $guildId", t)
             false
         }
+    }
+
+    /** يمسح الحالة المحفوظة في الذاكرة لسيرفر معين عشان التقديم يشتغل من جديد لو رجعت له. */
+    private fun clearGuildState(guildId: String) {
+        checkedGuilds.remove(guildId)
+        ApplicationApi.appliedGuilds.remove(guildId)
+        ApplicationApi.prefetchedForms.remove(guildId)
     }
 
     /** اسم السيرفر من الدعوة بالـ reflection (بدل guild.getName() اللي مش موجود في الـ stubs). */
@@ -304,7 +330,10 @@ class ServerApplicationFix : Plugin() {
                 if (isAuto && shouldSkipAuto(guildId)) return@thread
 
                 // عضو كامل: مفيش تقديم يتعرض ولا توست
-                if (ApplicationApi.isFullMember(guildId)) return@thread
+                if (ApplicationApi.isFullMember(guildId)) {
+                    clearGuildState(guildId)
+                    return@thread
+                }
 
                 val form = ApplicationApi.fetchForm(guildId)
 
@@ -349,11 +378,23 @@ class ServerApplicationFix : Plugin() {
                     return@thread
                 }
 
+                // طلب قديم منتهي (اتقبلت ثم خرجت): مانعتبرش إنك قدمت
+                ApplicationApi.appliedGuilds.remove(guildId)
+
+                // صفحة واحدة بس لكل سيرفر: أكتر من hook (join/select/create) كانوا بيفتحوا صفحات
+                // مكررة فتفضل صفحة مفتوحة حتى بعد ما تقدم وتتقفل الأولى.
+                if (!ApplicationApi.openPages.add(guildId)) return@thread
+
                 checkedGuilds.add(guildId)
                 ApplicationApi.prefetchedForms[guildId] = form
 
                 Handler(Looper.getMainLooper()).post {
-                    Utils.openPageWithProxy(getSafeActivity(), ApplicationPage(guildId))
+                    try {
+                        Utils.openPageWithProxy(getSafeActivity(), ApplicationPage(guildId))
+                    } catch (t: Throwable) {
+                        ApplicationApi.openPages.remove(guildId)
+                        logger.error("Failed to open application page for guild $guildId", t)
+                    }
                 }
             } catch (e: ApplicationApiException) {
                 logger.error("member-verification check failed for guild $guildId: HTTP ${e.statusCode}", e)
