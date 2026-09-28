@@ -88,14 +88,37 @@ object ApplicationApi {
         }
     }
 
+    /**
+     * اسم حالة طلب الانضمام من الـ store المحلي بالـ reflection، لأن الكلاسات دي مش موجودة
+     * (أو أسماؤها مختلفة) في discord stubs بتاعة الـ build.
+     */
+    fun joinRequestStatusName(guildId: Long): String? {
+        return try {
+            val store = StoreStream.getGuildJoinRequests()
+            val request = try {
+                store.javaClass.getMethod("getGuildJoinRequest", java.lang.Long.TYPE).invoke(store, guildId)
+            } catch (t: Throwable) {
+                null
+            } ?: return null
+            val status = try {
+                request.javaClass.getMethod("getApplicationStatus").invoke(request)
+            } catch (t: Throwable) {
+                null
+            } ?: return null
+            (status as? Enum<*>)?.name ?: status.toString()
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
     /** Status known by Discord's own local stores (kept in sync by the gateway). */
     private fun localStatus(guildId: String): String? {
         return try {
             val gid = guildId.toLong()
-            val meId = StoreStream.getUsers().getMeSnapshot().getId()
+            val meId = StoreStream.getUsers().me.id
             val member = StoreStream.getGuilds().getMember(gid, meId)
             if (member != null && !member.getPending()) return "APPROVED"
-            val name = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.getApplicationStatus()?.name
+            val name = joinRequestStatusName(gid)
             if (name != null) normalizeStatus(name) else null
         } catch (t: Throwable) {
             null
