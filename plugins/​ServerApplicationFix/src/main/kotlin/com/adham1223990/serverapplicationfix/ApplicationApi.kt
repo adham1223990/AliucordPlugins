@@ -49,7 +49,33 @@ object ApplicationApi {
         "REJECTED" -> "Rejected"
         "PENDING" -> "Under review"
         "STARTED" -> "Not submitted"
+        "DONE" -> "Done"
         else -> "Unknown"
+    }
+
+    /**
+     * true لو الفورم فيه أي حقل غير TERMS (يعني أسئلة تقديم حقيقية). لو كله TERMS فده مجرد
+     * موافقة على القوانين (Member Verification) ومش بيتحسب تقديم.
+     */
+    fun isApplicationForm(form: VerificationForm): Boolean {
+        var i = 0
+        while (i < form.fields.size) {
+            if (form.fields[i].fieldType != "TERMS") return true
+            i++
+        }
+        return false
+    }
+
+    /** true لو المستخدم عضو كامل في السيرفر (مش pending). */
+    fun isFullMember(guildId: String): Boolean {
+        return try {
+            val gid = guildId.toLong()
+            val meId = StoreStream.getUsers().me.id
+            val member = StoreStream.getGuilds().getMember(gid, meId)
+            member != null && !member.getPending()
+        } catch (t: Throwable) {
+            false
+        }
     }
 
     fun normalizeStatus(raw: String?): String {
@@ -115,9 +141,7 @@ object ApplicationApi {
     private fun localStatus(guildId: String): String? {
         return try {
             val gid = guildId.toLong()
-            val meId = StoreStream.getUsers().me.id
-            val member = StoreStream.getGuilds().getMember(gid, meId)
-            if (member != null && !member.getPending()) return "APPROVED"
+            if (isFullMember(guildId)) return "APPROVED"
             val name = joinRequestStatusName(gid)
             if (name != null) normalizeStatus(name) else null
         } catch (t: Throwable) {
@@ -169,11 +193,14 @@ object ApplicationApi {
 
     fun submitForm(guildId: String, form: VerificationForm): String {
         // حماية من التكرار بالتواصل مع API ديسكورد: لو فيه طلب موجود فعلاً منقدمش تاني
-        val existing = fetchJoinRequest(guildId)
-        if (existing != null && isFinalStatus(existing.status)) {
-            ApplicationStore.record(guildId, guildNames[guildId], existing.status)
-            appliedGuilds.add(guildId)
-            throw AlreadyAppliedException(existing.status)
+        val isApplication = isApplicationForm(form)
+        if (isApplication) {
+            val existing = fetchJoinRequest(guildId)
+            if (existing != null && isFinalStatus(existing.status)) {
+                ApplicationStore.record(guildId, guildNames[guildId], existing.status)
+                appliedGuilds.add(guildId)
+                throw AlreadyAppliedException(existing.status)
+            }
         }
 
         val fieldsArr = JSONArray()
@@ -197,6 +224,8 @@ object ApplicationApi {
             put("form_fields", fieldsArr)
         }
         val response = putWithInviteFallback(guildId, body)
+        // موافقة على القوانين بس: مانسجلهاش كتقديم
+        if (!isApplication) return "DONE"
         val raw = response.optString("application_status", "")
         val status = if (isBlankSafe(raw)) "PENDING" else normalizeStatus(raw)
         val finalStatus = if (status == "UNKNOWN" || status == "STARTED") "PENDING" else status
