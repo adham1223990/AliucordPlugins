@@ -40,6 +40,9 @@ object ApplicationApi {
     /** السيرفرات اللي قدّمنا عليها بنجاح في الجلسة دي، عشان مايتعرضش التقديم تاني. */
     val appliedGuilds: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
 
+    /** السيرفرات اللي صفحة التقديم بتاعتها مفتوحة دلوقتي — عشان ماتتفتحش أكتر من صفحة لنفس السيرفر. */
+    val openPages: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
+
     /** أسماء السيرفرات (من الدعوة) عشان تظهر في قائمة الإعدادات. */
     val guildNames = ConcurrentHashMap<String, String>()
 
@@ -89,9 +92,13 @@ object ApplicationApi {
         }
     }
 
-    /** True if this status means Discord already holds a finished application. */
+    /**
+     * True لو الحالة دي معناها إن التقديم لسه "شغال" ولازم يمنع تقديم جديد (قيد المراجعة أو مرفوض).
+     * APPROVED مش بتمنع: لو اتقبلت وبعدين خرجت/اتطردت، طلب القبول القديم بيفضل عند ديسكورد،
+     * ولو منعنا بسببه مش هتقدر تقدم تاني أبدًا.
+     */
     fun isFinalStatus(status: String): Boolean =
-        status == "PENDING" || status == "APPROVED" || status == "REJECTED"
+        status == "PENDING" || status == "REJECTED"
 
     /**
      * Asks Discord directly (GET /guilds/{id}/requests/@me) for this user's join request.
