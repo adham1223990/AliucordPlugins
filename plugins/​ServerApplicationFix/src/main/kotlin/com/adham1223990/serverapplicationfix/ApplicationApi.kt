@@ -3,6 +3,8 @@ package com.adham1223990.serverapplicationfix
 import com.aliucord.Http
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 class ApplicationApiException(val statusCode: Int, message: String) : Exception(message)
 
@@ -19,8 +21,20 @@ data class VerificationForm(val version: String, val fields: List<VerificationFi
 
 object ApplicationApi {
 
+    /**
+     * كود الدعوة لكل سيرفر (بيتسجل من الـ hook لما المستخدم يدوس Join على دعوة). دسكورد بيرجّع
+     * 10004 Unknown Guild لطلب الفورم لو المستخدم لسه مش عضو ومفيش invite_code في الطلب.
+     */
+    val inviteCodes = ConcurrentHashMap<String, String>()
+
     fun fetchForm(guildId: String): VerificationForm {
-        val root = request("/guilds/$guildId/member-verification?with_guild=true", "GET")
+        val code = inviteCodes[guildId]
+        val query = if (!code.isNullOrEmpty()) {
+            "with_guild=false&invite_code=" + URLEncoder.encode(code, "UTF-8")
+        } else {
+            "with_guild=false"
+        }
+        val root = request("/guilds/$guildId/member-verification?$query", "GET")
         val version = root.optString("version", "1")
         val fieldsJson = root.optJSONArray("form_fields") ?: JSONArray()
         val fields = ArrayList<VerificationField>()
