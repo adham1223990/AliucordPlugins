@@ -1,13 +1,8 @@
 package com.adham1223990.serverapplicationfix
 
-import android.os.Build
-import android.util.Base64
 import com.aliucord.Http
-import com.aliucord.utils.RNSuperProperties
-import com.discord.utilities.rest.RestAPI
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.Locale
 
 class ApplicationApiException(val statusCode: Int, message: String) : Exception(message)
 
@@ -23,17 +18,6 @@ data class VerificationField(
 data class VerificationForm(val version: String, val fields: List<VerificationField>)
 
 object ApplicationApi {
-
-    private const val API_BASE = "https://discord.com/api/v10"
-    
-    private const val RN_VERSION = "225.17 - rn"
-    private const val RN_BUILD_NUMBER = 225017
-    private const val RN_NATIVE_BUILD = 4320
-    private const val RN_RELEASE_CHANNEL = "googleRelease"
-    const val CURRENT_RN_USER_AGENT = "Discord-Android/$RN_BUILD_NUMBER;RNA"
-
-    @Volatile
-    private var cachedSuperProperties: String? = null
 
     fun fetchForm(guildId: String): VerificationForm {
         val root = request("/guilds/$guildId/member-verification?with_guild=true", "GET")
@@ -87,117 +71,51 @@ object ApplicationApi {
         request("/guilds/$guildId/requests/@me", "PUT", body)
     }
 
+    // بدائل يدوية للـ isBlank()/take() لأنها بتستخدم IntRange iterator داخليًا وبتتعارض مع
+    // نسخة Kotlin المعاد تسميتها جوه دسكورد (ClassCastException: d0.d0.b -> IntIterator).
+    private fun isBlankSafe(s: String?): Boolean {
+        if (s == null) return true
+        var i = 0
+        val n = s.length
+        while (i < n) {
+            if (!Character.isWhitespace(s[i])) return false
+            i++
+        }
+        return true
+    }
+
+    private fun limitSafe(s: String, max: Int): String =
+        if (s.length <= max) s else s.substring(0, max)
+
+    /**
+     * الطريقة الرسمية: Http.Request.newDiscordRNRequest بتبني الـ request بنفسها (الـ route
+     * والـ version والـ Authorization والهيدرز الخاصة بـ RN)، فمفيش أي تزوير أو reflection
+     * أو hooks من عندنا، وده بيخلي الطلب أقرب ما يكون لطلب التطبيق نفسه.
+     */
     private fun request(path: String, method: String, body: JSONObject? = null): JSONObject {
-        val req = createV10Request(path, method)
-        try {
-            val response = if (body != null) {
-                req.setHeader("Content-Type", "application/json")
-                req.executeWithBody(body.toString())
-            } else {
-                req.execute()
+        val req = Http.Request.newDiscordRNRequest(path, method)
+        val response = if (body != null) {
+            req.setHeader("Content-Type", "application/json")
+            req.executeWithBody(body.toString())
+        } else {
+            req.execute()
+        }
+        return response.use { res ->
+            if (!res.ok()) {
+                // assertOk() بترمي exception رسالتها فيها سطر جديد وبعده الـ body الحقيقي من دسكورد
+                val raw = runCatching { res.assertOk() }.exceptionOrNull()?.message.orEmpty()
+                val nl = raw.indexOf('\n')
+                val errorBody = if (nl >= 0) raw.substring(nl + 1) else ""
+                val message = if (!isBlankSafe(errorBody)) {
+                    "${res.statusCode}: ${limitSafe(errorBody, 300)}"
+                } else {
+                    "HTTP ${res.statusCode}"
+                }
+                throw ApplicationApiException(res.statusCode, message)
             }
-            if (!response.ok()) {
-                throw ApplicationApiException(response.statusCode, "${response.statusCode}: ${response.text().take(300)}")
-            }
-            val text = response.text()
-            return if (text.isBlank()) JSONObject() else JSONObject(text)
-        } catch (e: ApplicationApiException) {
-            throw e
-        } catch (t: Throwable) {
-            // Aliucord's Http.Request throws its own exception for non-2xx responses before we
-            // ever get to read the body ourselves, so its message is just the generic HTTP
-            // reason phrase (e.g. "403: Forbidden"), not Discord's actual JSON error. Pull the
-            // real body straight off the connection's error stream instead.
-            val conn = req.conn
-            val code = try { conn.responseCode } catch (e2: Throwable) { -1 }
-            val errorBody = try {
-                conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            } catch (e2: Throwable) {
-                ""
-            }
-            val message = if (errorBody.isNotBlank()) "$code: ${errorBody.take(300)}" else "$code: ${t.message}"
-            throw ApplicationApiException(code, message)
+            val text = res.text()
+            if (isBlankSafe(text)) JSONObject() else JSONObject(text)
         }
-    }
-
-    fun createV10Request(path: String, method: String): Http.Request {
-        val cleanPath = if (path.startsWith("/")) path else "/$path"
-        val fullUrl = "$API_BASE$cleanPath"
-
-        val req = Http.Request(fullUrl, method)
-
-        try {
-            val token = currentAuthToken()
-            if (!token.isNullOrEmpty()) {
-                req.setHeader("Authorization", token)
-            }
-        } catch (t: Throwable) {
-            throw IllegalStateException("failed setting Authorization header: ${t.message}", t)
-        }
-
-        try {
-            req.setHeader("User-Agent", CURRENT_RN_USER_AGENT)
-        } catch (t: Throwable) {
-            throw IllegalStateException("failed setting User-Agent header: ${t.message}", t)
-        }
-
-        try {
-            req.setHeader("X-Super-Properties", getSuperProperties())
-        } catch (t: Throwable) {
-            throw IllegalStateException("failed setting X-Super-Properties header: ${t.message}", t)
-        }
-
-        try {
-            req.setHeader("Accept-Language", Locale.getDefault().toLanguageTag())
-        } catch (t: Throwable) {
-            throw IllegalStateException("failed setting Accept-Language header: ${t.message}", t)
-        }
-
-        return req
-    }
-
-    /** Confirmed correct source (from a plugin that prints this exact value): the live app
-     *  token lives at RestAPI.AppHeadersProvider.INSTANCE.authToken, not on StoreAuthentication. */
-    private fun currentAuthToken(): String? {
-        return try {
-            RestAPI.AppHeadersProvider.INSTANCE.authToken
-        } catch (e: Throwable) {
-            null
-        }
-    }
-
-    fun getSuperProperties(): String {
-        cachedSuperProperties?.let { return it }
-        return synchronized(this) {
-            cachedSuperProperties ?: buildDeviceSuperProperties().also { cachedSuperProperties = it }
-        }
-    }
-
-    private fun buildDeviceSuperProperties(): String {
-        val properties = runCatching {
-            JSONObject(RNSuperProperties.superProperties.toString())
-        }.getOrElse { JSONObject() }
-
-        properties.put("os", "Android")
-        properties.put("browser", "Discord Android")
-        properties.put("device", Build.MODEL)
-        properties.put("device_manufacturer", Build.MANUFACTURER)
-        properties.put("device_model", Build.MODEL)
-        properties.put("os_version", Build.VERSION.RELEASE)
-        properties.put("os_sdk_version", Build.VERSION.SDK_INT.toString())
-        properties.put("system_locale", Locale.getDefault().toLanguageTag())
-        properties.put("client_version", RN_VERSION)
-        properties.put("release_channel", RN_RELEASE_CHANNEL)
-        properties.put("client_build_number", RN_BUILD_NUMBER)
-        properties.put("native_build_number", RN_NATIVE_BUILD)
-        properties.put("has_client_mods", false)
-        properties.put("design_id", 0)
-        properties.put("launch_signature", (System.currentTimeMillis() * 1_000_000L).toString())
-
-        return Base64.encodeToString(
-            properties.toString().toByteArray(Charsets.UTF_8),
-            Base64.NO_WRAP
-        )
     }
 
     private fun JSONArray?.toStringList(): List<String> {
