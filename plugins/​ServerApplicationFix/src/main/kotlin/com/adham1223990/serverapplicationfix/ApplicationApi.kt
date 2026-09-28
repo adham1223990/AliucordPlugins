@@ -92,10 +92,10 @@ object ApplicationApi {
     private fun localStatus(guildId: String): String? {
         return try {
             val gid = guildId.toLong()
-            val meId = StoreStream.getUsers().meSnapshot.id
+            val meId = StoreStream.getUsers().getMeSnapshot().getId()
             val member = StoreStream.getGuilds().getMember(gid, meId)
-            if (member != null && !member.pending) return "APPROVED"
-            val name = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.applicationStatus?.name
+            if (member != null && !member.getPending()) return "APPROVED"
+            val name = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.getApplicationStatus()?.name
             if (name != null) normalizeStatus(name) else null
         } catch (t: Throwable) {
             null
