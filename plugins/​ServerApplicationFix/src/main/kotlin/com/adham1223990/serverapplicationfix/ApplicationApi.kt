@@ -1,12 +1,19 @@
 package com.adham1223990.serverapplicationfix
 
 import com.aliucord.Http
+import com.discord.stores.StoreStream
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 
 class ApplicationApiException(val statusCode: Int, message: String) : Exception(message)
+
+/** Thrown when Discord already has an application from this user for the server. */
+class AlreadyAppliedException(val status: String) :
+    Exception("You already applied to this server (${ApplicationApi.statusLabel(status)}).")
+
+data class JoinRequestInfo(val status: String, val rejectionReason: String?)
 
 data class VerificationField(
     val fieldType: String,
@@ -29,6 +36,79 @@ object ApplicationApi {
 
     /** الفورم اللي الـ hook جابه خلاص، عشان الصفحة متعملش طلب تاني (بتاخده مرة واحدة). */
     val prefetchedForms = ConcurrentHashMap<String, VerificationForm>()
+
+    /** السيرفرات اللي قدّمنا عليها بنجاح في الجلسة دي، عشان مايتعرضش التقديم تاني. */
+    val appliedGuilds: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
+
+    /** أسماء السيرفرات (من الدعوة) عشان تظهر في قائمة الإعدادات. */
+    val guildNames = ConcurrentHashMap<String, String>()
+
+    /** Human readable English label for a normalized status. */
+    fun statusLabel(status: String): String = when (status) {
+        "APPROVED" -> "Accepted"
+        "REJECTED" -> "Rejected"
+        "PENDING" -> "Under review"
+        "STARTED" -> "Not submitted"
+        else -> "Unknown"
+    }
+
+    fun normalizeStatus(raw: String?): String {
+        if (raw == null) return "UNKNOWN"
+        return when (raw.uppercase()) {
+            "SUBMITTED", "PENDING" -> "PENDING"
+            "APPROVED" -> "APPROVED"
+            "REJECTED" -> "REJECTED"
+            "STARTED" -> "STARTED"
+            else -> "UNKNOWN"
+        }
+    }
+
+    /** True if this status means Discord already holds a finished application. */
+    fun isFinalStatus(status: String): Boolean =
+        status == "PENDING" || status == "APPROVED" || status == "REJECTED"
+
+    /**
+     * Asks Discord directly (GET /guilds/{id}/requests/@me) for this user's join request.
+     * Returns null when Discord has no request for us or the endpoint is not available.
+     */
+    fun fetchJoinRequest(guildId: String): JoinRequestInfo? {
+        return try {
+            val root = request("/guilds/$guildId/requests/@me", "GET")
+            val raw = root.optString("application_status", "")
+            if (isBlankSafe(raw)) {
+                null
+            } else {
+                val reason = root.optString("rejection_reason", "")
+                JoinRequestInfo(normalizeStatus(raw), if (isBlankSafe(reason)) null else reason)
+            }
+        } catch (e: ApplicationApiException) {
+            null
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** Status known by Discord's own local stores (kept in sync by the gateway). */
+    private fun localStatus(guildId: String): String? {
+        return try {
+            val gid = guildId.toLong()
+            val meId = StoreStream.getUsers().meSnapshot.id
+            val member = StoreStream.getGuilds().getMember(gid, meId)
+            if (member != null && !member.pending) return "APPROVED"
+            val name = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.applicationStatus?.name
+            if (name != null) normalizeStatus(name) else null
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** Best available status: full membership, then Discord's API, then the local stores. */
+    fun resolveStatus(guildId: String): String? {
+        if (localStatus(guildId) == "APPROVED") return "APPROVED"
+        val fromApi = fetchJoinRequest(guildId)
+        if (fromApi != null) return fromApi.status
+        return localStatus(guildId)
+    }
 
     fun fetchForm(guildId: String): VerificationForm {
         val code = inviteCodes[guildId]
@@ -64,7 +144,15 @@ object ApplicationApi {
         return VerificationForm(version, fields)
     }
 
-    fun submitForm(guildId: String, form: VerificationForm) {
+    fun submitForm(guildId: String, form: VerificationForm): String {
+        // حماية من التكرار بالتواصل مع API ديسكورد: لو فيه طلب موجود فعلاً منقدمش تاني
+        val existing = fetchJoinRequest(guildId)
+        if (existing != null && isFinalStatus(existing.status)) {
+            ApplicationStore.record(guildId, guildNames[guildId], existing.status)
+            appliedGuilds.add(guildId)
+            throw AlreadyAppliedException(existing.status)
+        }
+
         val fieldsArr = JSONArray()
         var fi = 0
         while (fi < form.fields.size) {
@@ -85,7 +173,12 @@ object ApplicationApi {
             put("version", form.version)
             put("form_fields", fieldsArr)
         }
-        request("/guilds/$guildId/requests/@me", "PUT", body)
+        val response = request("/guilds/$guildId/requests/@me", "PUT", body)
+        val raw = response.optString("application_status", "")
+        val status = if (isBlankSafe(raw)) "PENDING" else normalizeStatus(raw)
+        val finalStatus = if (status == "UNKNOWN" || status == "STARTED") "PENDING" else status
+        ApplicationStore.record(guildId, guildNames[guildId], finalStatus)
+        return finalStatus
     }
 
     // بدائل يدوية للـ isBlank()/take() لأنها بتستخدم IntRange iterator داخليًا وبتتعارض مع
