@@ -145,7 +145,7 @@ class ServerApplicationFix : Plugin() {
                     val guildId = guildIdLong.toString()
                     val inviteCode = inviteCodeOf(param.args[3] as? ModelInvite)
                     if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
-                    val inviteGuildName = (param.args[3] as? ModelInvite)?.guild?.getName()
+                    val inviteGuildName = guildNameOf(param.args[3] as? ModelInvite)
                     if (!inviteGuildName.isNullOrEmpty()) ApplicationApi.guildNames[guildId] = inviteGuildName
                     logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId (invite: $inviteCode)")
                     checkAndTriggerApplication(guildId, isAuto = false)
@@ -228,14 +228,33 @@ class ServerApplicationFix : Plugin() {
         return try {
             if (ApplicationApi.appliedGuilds.contains(guildId)) return true
             val gid = guildId.toLong()
-            val meId = StoreStream.getUsers().getMeSnapshot().getId()
+            val meId = StoreStream.getUsers().me.id
             val member = StoreStream.getGuilds().getMember(gid, meId)
             if (member != null && !member.getPending()) return true
-            val status = StoreStream.getGuildJoinRequests().getGuildJoinRequest(gid)?.getApplicationStatus()
-            status != null && status.name != "STARTED" && status.name != "UNKNOWN"
+            val statusName = ApplicationApi.joinRequestStatusName(gid)
+            statusName != null && statusName != "STARTED" && statusName != "UNKNOWN"
         } catch (t: Throwable) {
             logger.error("shouldSkipAuto failed for guild $guildId", t)
             false
+        }
+    }
+
+    /** اسم السيرفر من الدعوة بالـ reflection (بدل guild.getName() اللي مش موجود في الـ stubs). */
+    private fun guildNameOf(invite: ModelInvite?): String? {
+        if (invite == null) return null
+        return try {
+            val guild = try {
+                ModelInvite::class.java.getDeclaredField("guild").apply { isAccessible = true }.get(invite)
+            } catch (t: Throwable) {
+                ModelInvite::class.java.getMethod("getGuild").invoke(invite)
+            } ?: return null
+            try {
+                guild.javaClass.getMethod("getName").invoke(guild) as? String
+            } catch (t: Throwable) {
+                guild.javaClass.getDeclaredField("name").apply { isAccessible = true }.get(guild) as? String
+            }
+        } catch (t: Throwable) {
+            null
         }
     }
 
