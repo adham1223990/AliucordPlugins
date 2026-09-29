@@ -165,10 +165,18 @@ object ApplicationApi {
 
     fun fetchForm(guildId: String): VerificationForm {
         val code = inviteCodes[guildId]
+        // مع invite_code: with_guild=false (زي ما ديسكورد بيعمل وانت بتعاين دعوة لسيرفر لسه
+        // مش عضو فيه). من غير invite_code (زي زرار "Apply to Join" جوه بروفايل سيرفر عادي، مش
+        // من دعوة): كنا بنبعت with_guild=false برضو وده غلط — الكومبينيشن ده (from غير
+        // invite_code) هو اللي كان بيرجّع 10004 Unknown Guild من ديسكورد، فديسكورد كان بيعرض
+        // توست الخطأ ده لوحده (جزء من newDiscordRNRequest نفسها)، وإحنا كنا بنقرأ فورم فاضي
+        // (form.fields فاضية) فـ isApplicationForm كان بيرجع false ونسيب الشاشة الأصلية تفتح
+        // بدالنا. الصح إننا نبعت with_guild=true في الحالة دي عشان ديسكورد يجيب الفورم عن طريق
+        // الـ guildId مباشرة من غير ما يحتاج سياق دعوة.
         val query = if (!code.isNullOrEmpty()) {
             "with_guild=false&invite_code=" + URLEncoder.encode(code, "UTF-8")
         } else {
-            "with_guild=false"
+            "with_guild=true"
         }
         val root = request("/guilds/$guildId/member-verification?$query", "GET")
         val version = root.optString("version", "1")
