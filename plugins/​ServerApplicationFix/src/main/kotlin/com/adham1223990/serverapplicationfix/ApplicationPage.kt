@@ -1,20 +1,17 @@
 package com.adham1223990.serverapplicationfix
 
 import android.content.Context
-import android.graphics.Color
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.TextView
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.aliucord.fragments.SettingsPage
+import com.adham1223990.serverapplicationfix.FormStyle.dp
 
 class ApplicationPage(private val guildId: String) : SettingsPage() {
     private val logger = Logger("ServerApplicationFix")
@@ -28,7 +25,8 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
-        setActionBarTitle("Server Application")
+        val guildName = ApplicationApi.guildNames[guildId]
+        setActionBarTitle(if (!guildName.isNullOrEmpty()) guildName else "Server Application")
         container = linearLayout
         reload()
     }
@@ -94,23 +92,14 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
         if (!::container.isInitialized) return
         val ctx = container.context
         container.removeAllViews()
+        container.setPadding(ctx.dp(16), ctx.dp(4), ctx.dp(16), ctx.dp(24))
 
         when {
-            loading -> container.addView(TextView(ctx).apply {
-                text = "Loading application…"
-                setTextColor(Color.WHITE)
-                setPadding(32, 32, 32, 32)
-            })
+            loading -> container.addView(FormStyle.bodyText(ctx, "Loading application…"))
 
             error != null -> {
-                container.addView(TextView(ctx).apply {
-                    text = "Failed to load the application:\n$error"
-                    setTextColor(Color.WHITE)
-                    setPadding(32, 32, 32, 16)
-                })
-                container.addView(Button(ctx).apply {
-                    text = "Retry"
-                    styleWhite()
+                container.addView(FormStyle.bodyText(ctx, "Failed to load the application:\n$error"))
+                container.addView(FormStyle.primaryButton(ctx, "Retry").apply {
                     setOnClickListener { reload(useCached = false) }
                 })
             }
@@ -119,40 +108,55 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
         }
     }
 
+    /** يبني هيدر شبه هيدر "Answer a few questions to join" في تطبيق ديسكورد الأصلي. */
+    private fun renderHeader(ctx: Context, f: VerificationForm) {
+        val guildName = ApplicationApi.guildNames[guildId]
+        container.addView(FormStyle.pageTitle(ctx, "Answer a few questions to join"))
+        if (!guildName.isNullOrEmpty()) {
+            container.addView(FormStyle.pageTitle(ctx, guildName))
+        }
+        // الفورم القوانين بس (بدون أي سؤال حقيقي) وصفه مختلف عن فورم فيه أسئلة تقديم.
+        val subtitle = if (ApplicationApi.isApplicationForm(f)) {
+            "The server admin will get back to you shortly after you submit."
+        } else {
+            "Please read and agree to the server rules to continue."
+        }
+        container.addView(FormStyle.pageSubtitle(ctx, subtitle))
+        container.addView(FormStyle.divider(ctx).apply {
+            val lp = layoutParams as LinearLayout.LayoutParams
+            lp.topMargin = ctx.dp(16); lp.bottomMargin = ctx.dp(4)
+            layoutParams = lp
+        })
+    }
+
     private fun renderForm(ctx: Context, f: VerificationForm) {
+        renderHeader(ctx, f)
+
         for (field in f.fields) {
             when (field.fieldType) {
                 "TERMS" -> {
-                    for (rule in field.values) {
-                        container.addView(TextView(ctx).apply {
-                            text = rule
-                            setTextColor(Color.WHITE)
-                            setPadding(32, 8, 32, 8)
-                        })
+                    container.addView(FormStyle.boldSectionHeader(ctx, "Read & Agree to Server Rules"))
+                    container.addView(FormStyle.rulesCard(ctx, field.values))
+                    val agreeText = if (field.required) {
+                        "I have read and agree to the rules"
+                    } else {
+                        "I have read and agree"
                     }
-                    container.addView(CheckBox(ctx).apply {
-                        text = if (field.required) "I have read and agree (required)" else "I have read and agree"
-                        setTextColor(Color.WHITE)
-                        setPadding(32, 8, 32, 8)
-                        setOnCheckedChangeListener { _, checked ->
-                            field.response = if (checked) "true" else "false"
-                        }
+                    container.addView(FormStyle.agreeRow(ctx, agreeText) { checked ->
+                        field.response = if (checked) "true" else "false"
+                    }.apply {
+                        val lp = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                        lp.topMargin = ctx.dp(12)
+                        layoutParams = lp
                     })
                 }
 
-                "TEXT_INPUT", "PARAGRAPH" -> {
-                    container.addView(TextView(ctx).apply {
-                        text = if (field.required) "${field.label} *" else field.label
-                        setTextColor(Color.WHITE)
-                        setPadding(32, 16, 32, 4)
-                    })
-                    container.addView(EditText(ctx).apply {
-                        setTextColor(Color.WHITE)
-                        setHintTextColor(Color.LTGRAY)
-                        if (field.fieldType == "PARAGRAPH") {
-                            isSingleLine = false
-                            minLines = 3
-                        }
+                "TEXT_INPUT" -> {
+                    container.addView(FormStyle.questionLabel(ctx, field.label, field.required))
+                    container.addView(FormStyle.shortAnswerField(ctx).apply {
                         addTextChangedListener(object : TextWatcher {
                             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -163,47 +167,34 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
                     })
                 }
 
+                "PARAGRAPH" -> {
+                    container.addView(FormStyle.questionLabel(ctx, field.label, field.required))
+                    val (card, _) = FormStyle.paragraphField(ctx) { text, counter ->
+                        field.response = text
+                        val remaining = FormStyle.PARAGRAPH_MAX_LEN - text.length
+                        counter.text = remaining.coerceAtLeast(0).toString()
+                    }
+                    container.addView(card)
+                }
+
                 "MULTIPLE_CHOICE" -> {
-                    container.addView(TextView(ctx).apply {
-                        text = if (field.required) "${field.label} *" else field.label
-                        setTextColor(Color.WHITE)
-                        setPadding(32, 16, 32, 4)
+                    container.addView(FormStyle.questionLabel(ctx, field.label, field.required))
+                    container.addView(FormStyle.choiceCard(ctx, field.choices) { index ->
+                        field.response = index
                     })
-                    val group = RadioGroup(ctx).apply { orientation = RadioGroup.VERTICAL }
-                    for (choice in field.choices) {
-                        group.addView(RadioButton(ctx).apply {
-                            text = choice
-                            setTextColor(Color.WHITE)
-                            id = View.generateViewId()
-                        })
-                    }
-                    group.setOnCheckedChangeListener { rg, checkedId ->
-                        var i = 0
-                        while (i < rg.childCount) {
-                            if (rg.getChildAt(i).id == checkedId) {
-                                field.response = i
-                                break
-                            }
-                            i++
-                        }
-                    }
-                    container.addView(group)
                 }
 
                 else -> {
-                    container.addView(TextView(ctx).apply {
-                        text = "${field.label}\n(Unsupported field type: ${field.fieldType}. " +
+                    container.addView(FormStyle.bodyText(
+                        ctx,
+                        "${field.label}\n(Unsupported field type: ${field.fieldType}. " +
                             "Please use the official Discord app for this field.)"
-                        setTextColor(Color.WHITE)
-                        setPadding(32, 16, 32, 16)
-                    })
+                    ))
                 }
             }
         }
 
-        container.addView(Button(ctx).apply {
-            text = "Submit Application"
-            styleWhite()
+        container.addView(FormStyle.primaryButton(ctx, "Complete").apply {
             isEnabled = !submitting
             setOnClickListener {
                 val missing = f.fields.any {
@@ -224,6 +215,9 @@ class ApplicationPage(private val guildId: String) : SettingsPage() {
         // ديسكورد مباشرة وبيرفض بس لو الطلب فعلاً قيد المراجعة أو مرفوض.
         submitting = true
         Utils.showToast("Submitting…")
+        (container.getChildAt(container.childCount - 1) as? Button)?.let {
+            FormStyle.setButtonEnabled(container.context, it, false)
+        }
 
         Utils.threadPool.execute {
             val result = runCatching { ApplicationApi.submitForm(guildId, f) }
