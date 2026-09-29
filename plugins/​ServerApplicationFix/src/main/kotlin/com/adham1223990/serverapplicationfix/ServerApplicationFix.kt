@@ -76,12 +76,20 @@ class ServerApplicationFix : Plugin() {
                         val targetGuildIdLong = guildIdLong.toLong()
                         val member = StoreStream.getGuilds().getMember(targetGuildIdLong, meIdLong)
 
-                        // عضو كامل: امسح أي حالة قديمة (لو اتطردت/خرجت بعدين ورجعت تقدم تاني)
-                        if (member != null && !member.getPending()) clearGuildState(guildId)
+                        // member == null معناها بيانات السيرفر لسه بتتحمّل (بيحصل فور ما التطبيق
+                        // يفتح بعد ريستارت، أو لحظيًا لسيرفر جديد) — مش إن المستخدم "مش عضو".
+                        // كنا بنعامل null كإشارة "افتح الفورم" فكان بيفتح فورم قديم كل ما تعمل
+                        // ريستارت للسيرفر اللي كان مفتوح قبل ما تقفل التطبيق. دلوقتي منسيبهوش.
+                        if (member == null) return@V
 
-                        // إذا كان العضو بدون رتب أو في حالة معاينة يتم التحقق
-                        if (member == null || member.roles.isEmpty()) {
+                        // الإشارة الصحيحة إن العضو محتاج تقديم هي getPending() فعلاً (Membership
+                        // Screening/Join Request)، مش roles.isEmpty() — كتير من الأعضاء الكاملين
+                        // (اتقبلوا فعلاً) مالهومش أي رتب أصلاً وده كان بيخليهم ياخدوا الفورم كل
+                        // ما يدخلوا السيرفر حتى لو بس بيتصفحوا محتواه.
+                        if (member.getPending()) {
                             checkAndTriggerApplication(guildId, isAuto = true)
+                        } else {
+                            clearGuildState(guildId)
                         }
                     } catch (e: Throwable) {
                         logger.error("Error handling guild selection", e)
