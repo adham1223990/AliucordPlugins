@@ -146,38 +146,59 @@ class ServerApplicationFix : Plugin() {
         // 2.6 التصحيح الفعلي: لما السيرفر فيه Membership Screening (Verification Gate)،
         // دسكورد أصلاً مش بيعدي على GuildJoinHelperKt.joinGuild خالص — بيقفز على طول لفتح
         // شاشته الأصلية عن طريق MemberVerificationUtils.showMemberVerificationWidget() اللي
-        // بتنده على WidgetMemberVerification.Companion.create(...). ده نقطة الاختناق الوحيدة
-        // (تأكدنا منها من الديكومبايل)، فبنعمل PreHook هنا ونمنع تنفيذ الأصلي بالكامل
-        // (param.setResult(null)) ونفتح ApplicationPage بتاعتنا بدالها، سواء الانضمام جه من
-        // زرار Join عادي أو من قبول Invite لسيرفر مقفول بـ verification gate.
+        // بتنده على WidgetMemberVerification.Companion.create(...). ده نقطة الاختناق، فبنعمل
+        // PreHook هنا ونمنع تنفيذ الأصلي بالكامل (param.setResult(null)) ونفتح ApplicationPage
+        // بتاعتنا بدالها.
+        //
+        // ملحوظة مهمة: create() فيها أكتر من overload — مش بس النسخة اللي بتاخد ModelInvite (لما
+        // الانضمام جاي من دعوة). لما تقدّم على سيرفر عن طريق "Apply to Join" من بروفايل السيرفر
+        // نفسه (مش من رابط دعوة)، دسكورد بينده على overload تاني بباراميترات مختلفة، وكنا بنهوك
+        // النسخة اللي فيها ModelInvite بس. فكان أي فورم بييجي من overload تاني بيعدي من غير ما
+        // نتدخل خالص، وده اللي بيفسّر إن أسئلة زي دي (سؤال واحد multiple choice، مش جاي من
+        // دعوة) كانت بتفتح شاشة ديسكورد الأصلية عادي. دلوقتي بنهوك كل overload اسمه create.
         try {
-            val createMethod = WidgetMemberVerification.Companion::class.java.getDeclaredMethod(
-                "create",
-                Context::class.java,
-                Long::class.javaPrimitiveType,
-                String::class.java,
-                ModelInvite::class.java
-            )
-            patcher.patch(createMethod, PreHook { param ->
-                try {
-                    if (bypassNative) return@PreHook
-                    val guildIdLong = param.args[1] as Long
-                    val guildId = guildIdLong.toString()
-                    // عضو كامل: مانتدخلش خالص (مفيش تقديم يتعرض)
-                    if (ApplicationApi.isFullMember(guildId)) return@PreHook
-                    nativeCalls[guildId] = NativeCall(createMethod, param.thisObject, param.args.copyOf())
-                    val inviteCode = inviteCodeOf(param.args[3] as? ModelInvite)
-                    if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
-                    val inviteGuildName = guildNameOf(param.args[3] as? ModelInvite)
-                    if (!inviteGuildName.isNullOrEmpty()) ApplicationApi.guildNames[guildId] = inviteGuildName
-                    logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create for guild $guildId (invite: $inviteCode)")
-                    checkAndTriggerApplication(guildId, isAuto = false)
-                    param.setResult(null)
-                } catch (e: Throwable) {
-                    logger.error("Failed to intercept WidgetMemberVerification.create for guild", e)
+            val createMethods = WidgetMemberVerification.Companion::class.java.declaredMethods
+                .filter { it.name == "create" }
+
+            if (createMethods.isEmpty()) {
+                logger.error("ServerApplicationFix: no create() overload found on WidgetMemberVerification.Companion", null)
+                Utils.showToast("ServerApplicationFix: couldn't hook the native verification screen, plugin needs an update.", false)
+            }
+
+            for (createMethod in createMethods) {
+                val paramTypes = createMethod.parameterTypes
+                // الـ guildId هو أول باراميتر من نوع Long/long في الـ overload ده.
+                val guildIdIndex = paramTypes.indexOfFirst { it == java.lang.Long.TYPE || it == java.lang.Long::class.java }
+                if (guildIdIndex == -1) {
+                    logger.error("ServerApplicationFix: create() overload without a guildId param, skipping: $createMethod", null)
+                    continue
                 }
-            })
-            logger.info("ServerApplicationFix: patched WidgetMemberVerification.Companion.create")
+                // أول باراميتر من نوع ModelInvite لو موجود؛ overloads الـ "Apply to Join" (مش من
+                // دعوة) غالبًا ملهاش الباراميتر ده خالص.
+                val inviteIndex = paramTypes.indexOfFirst { ModelInvite::class.java.isAssignableFrom(it) }
+
+                patcher.patch(createMethod, PreHook { param ->
+                    try {
+                        if (bypassNative) return@PreHook
+                        val guildIdLong = param.args[guildIdIndex] as Long
+                        val guildId = guildIdLong.toString()
+                        // عضو كامل: مانتدخلش خالص (مفيش تقديم يتعرض)
+                        if (ApplicationApi.isFullMember(guildId)) return@PreHook
+                        nativeCalls[guildId] = NativeCall(createMethod, param.thisObject, param.args.copyOf())
+                        val invite = if (inviteIndex != -1) param.args[inviteIndex] as? ModelInvite else null
+                        val inviteCode = inviteCodeOf(invite)
+                        if (!inviteCode.isNullOrEmpty()) ApplicationApi.inviteCodes[guildId] = inviteCode
+                        val inviteGuildName = guildNameOf(invite)
+                        if (!inviteGuildName.isNullOrEmpty()) ApplicationApi.guildNames[guildId] = inviteGuildName
+                        logger.info("ServerApplicationFix: intercepted native WidgetMemberVerification.create(${paramTypes.joinToString { it.simpleName }}) for guild $guildId (invite: $inviteCode)")
+                        checkAndTriggerApplication(guildId, isAuto = false)
+                        param.setResult(null)
+                    } catch (e: Throwable) {
+                        logger.error("Failed to intercept WidgetMemberVerification.create for guild", e)
+                    }
+                })
+                logger.info("ServerApplicationFix: patched WidgetMemberVerification.Companion.create(${paramTypes.joinToString { it.simpleName }})")
+            }
         } catch (e: Throwable) {
             logger.error("Failed to patch WidgetMemberVerification.Companion.create", e)
             Utils.showToast("ServerApplicationFix: couldn't hook the native verification screen, plugin needs an update.", false)
