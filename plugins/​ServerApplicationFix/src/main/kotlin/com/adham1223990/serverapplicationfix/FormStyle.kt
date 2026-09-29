@@ -76,7 +76,7 @@ object FormStyle {
             })
             if (required) {
                 addView(TextView(ctx).apply {
-                    text = " *"
+                    this.text = " *"
                     setTextColor(color(DANGER))
                     textSize = 15f
                 })
@@ -221,7 +221,7 @@ object FormStyle {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         val box = CheckBox(ctx).apply {
-            text = ""
+            this.text = ""
             CompoundButtonCompat.setButtonTintList(this, radioTint(ctx))
         }
         row.addView(box)
