@@ -70,10 +70,26 @@ class TwoFaHelper : Plugin() {
         patcher.unpatchAll()
     }
 
+    /** Finds the first declared field of [type] on an object's class, instead of relying on a
+     *  hardcoded obfuscated field name (those differ between builds and app versions). */
+    private fun <T> findFieldOfType(obj: Any, type: Class<T>): T? {
+        val fields = obj.javaClass.declaredFields
+        var i = 0
+        while (i < fields.size) {
+            val f = fields[i]
+            if (type.isAssignableFrom(f.type)) {
+                f.isAccessible = true
+                @Suppress("UNCHECKED_CAST")
+                return f.get(obj) as? T
+            }
+            i++
+        }
+        return null
+    }
+
     private fun addHelperButton(fragment: WidgetAuthMfa, getBindingMethod: Method, evaluateCodeMethod: Method) {
         val binding = getBindingMethod.invoke(fragment) ?: return
-        val rootField = binding.javaClass.getDeclaredField("a").apply { isAccessible = true }
-        val root = rootField.get(binding) as? CoordinatorLayout ?: return
+        val root = findFieldOfType(binding, CoordinatorLayout::class.java) ?: return
 
         // Avoid stacking a second button if this ever runs twice for the same view.
         if (root.findViewWithTag<View>(buttonTag) != null) return
@@ -129,8 +145,7 @@ class TwoFaHelper : Plugin() {
         }
 
         val binding = getBindingMethod.invoke(fragment) ?: return
-        val codeViewField = binding.javaClass.getDeclaredField("f2242b").apply { isAccessible = true }
-        val codeView = codeViewField.get(binding) as? CodeVerificationView
+        val codeView = findFieldOfType(binding, CodeVerificationView::class.java)
 
         // Fill the boxes visually first, then submit through Discord's own evaluateCode() —
         // the exact same private method the native "type" and "paste" flows call.
