@@ -113,13 +113,19 @@ class TwoFaHelper : Plugin() {
         params.topMargin = (420 * density).toInt()
 
         button.setOnClickListener {
-            showPicker(fragment, root.context, getBindingMethod, evaluateCodeMethod)
+            showPicker(fragment, root.context, getBindingMethod, evaluateCodeMethod, button)
         }
 
         root.addView(button, params)
     }
 
-    private fun showPicker(fragment: WidgetAuthMfa, ctx: Context, getBindingMethod: Method, evaluateCodeMethod: Method) {
+    private fun showPicker(
+        fragment: WidgetAuthMfa,
+        ctx: Context,
+        getBindingMethod: Method,
+        evaluateCodeMethod: Method,
+        button: Button
+    ) {
         val entries = TwoFaStore.all()
         if (entries.isEmpty()) {
             Utils.showToast("No saved 2FA secrets yet. Add one from the plugin settings.", true)
@@ -132,32 +138,52 @@ class TwoFaHelper : Plugin() {
             .setTitle("Paste a 2FA code")
             .setItems(names) { dialog, which ->
                 dialog.dismiss()
-                submitCode(fragment, entries[which], getBindingMethod, evaluateCodeMethod)
+                submitCode(fragment, entries[which], getBindingMethod, evaluateCodeMethod, button)
             }
             .show()
     }
 
-    private fun submitCode(fragment: WidgetAuthMfa, entry: TwoFaEntry, getBindingMethod: Method, evaluateCodeMethod: Method) {
+    @Volatile
+    private var submitting = false
+
+    private fun submitCode(
+        fragment: WidgetAuthMfa,
+        entry: TwoFaEntry,
+        getBindingMethod: Method,
+        evaluateCodeMethod: Method,
+        button: Button
+    ) {
+        if (submitting) {
+            Utils.showToast("Already submitting a code, please wait…", true)
+            return
+        }
+
         val code = Totp.currentCode(entry.secret)
         if (code == null) {
             Utils.showToast("That saved secret key looks invalid.", true)
             return
         }
 
-        val binding = getBindingMethod.invoke(fragment) ?: return
-        val codeView = findFieldOfType(binding, CodeVerificationView::class.java)
-
-        // Fill the boxes visually first, then submit through Discord's own evaluateCode() —
-        // the exact same private method the native "type" and "paste" flows call.
-        codeView?.setCode(code)
-
-        Handler(Looper.getMainLooper()).postDelayed({
-            try {
-                evaluateCodeMethod.invoke(fragment, code)
-            } catch (e: Throwable) {
-                logger.error("Failed to submit pasted 2FA code", e)
-                Utils.showToast("Failed to submit code: ${e.message}", true)
-            }
-        }, 150)
+        // Submits exactly once through Discord's own evaluateCode(). We deliberately do NOT
+        // call CodeVerificationView.setCode() here: on the real build it turned out to already
+        // trigger the same submission internally (that's why the native paste flow swaps the
+        // listener to a no-op first), so calling both ended up submitting the code twice —
+        // once automatically, once from us — and the second attempt was rejected as invalid.
+        submitting = true
+        button.isEnabled = false
+        Utils.showToast("Submitting code $code for ${entry.name}…", true)
+        try {
+            evaluateCodeMethod.invoke(fragment, code)
+        } catch (e: Throwable) {
+            logger.error("Failed to submit 2FA code", e)
+            Utils.showToast("Failed to submit code: ${e.message}", true)
+        } finally {
+            // Re-enabled after a short delay rather than immediately, so a second tap can't
+            // race the first submission while Discord is still processing it.
+            Handler(Looper.getMainLooper()).postDelayed({
+                submitting = false
+                button.isEnabled = true
+            }, 1000)
+        }
     }
 }
