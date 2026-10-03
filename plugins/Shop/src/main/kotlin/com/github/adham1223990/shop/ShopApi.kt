@@ -24,6 +24,50 @@ internal object ShopApi {
             }
     }
 
+    // Orbs-exclusive collections live on a separate tab of the shop and are NOT included in
+    // /collectibles-categories/v2 (that's why "Orbs Exclusive" was always empty before). This
+    // fetches that tab specifically and force-marks every category in it as Orbs-exclusive,
+    // since the whole tab is Orbs-only by definition regardless of what is_orbs_exclusive says.
+    fun orbsCategories(token: String): List<JSONObject> {
+        return Http.Request
+            .newDiscordRNRequest(
+                "/collectibles-shop?tab=orbs&include_bundles=true&variants_return_style=1",
+                "GET",
+            ).use { request ->
+                request.setHeader("Authorization", token)
+                request.setRequestTimeout(15_000)
+                request.execute().use { response ->
+                    if (!response.ok()) return@use emptyList()
+                    val root = JSONObject(response.text())
+                    val categories = root.optJSONArray("categories") ?: return@use emptyList()
+                    objects(categories)
+                        .filter { products(it).isNotEmpty() }
+                        .map { category -> JSONObject(category.toString()).put("is_orbs_exclusive", true) }
+                }
+            }
+    }
+
+    // Merges the Orbs-only tab's categories into the main list, matching by id/sku_id so the
+    // same collection isn't shown twice; when a category already exists, its is_orbs_exclusive
+    // flag is upgraded to true instead of adding a duplicate row.
+    fun mergeOrbsCategories(base: List<JSONObject>, orbs: List<JSONObject>): List<JSONObject> {
+        fun key(category: JSONObject) = category.optString("sku_id").ifEmpty { category.optString("id") }
+            .ifEmpty { category.toString() }
+
+        val merged = LinkedHashMap<String, JSONObject>()
+        base.forEach { merged[key(it)] = it }
+        orbs.forEach { orbCategory ->
+            val existingKey = key(orbCategory)
+            val existing = merged[existingKey]
+            merged[existingKey] = if (existing != null) {
+                JSONObject(existing.toString()).put("is_orbs_exclusive", true)
+            } else {
+                orbCategory
+            }
+        }
+        return merged.values.toList()
+    }
+
     fun token(): String? = RestAPI.AppHeadersProvider.INSTANCE.authToken?.takeIf(::hasText)
 
     // Orbs: https://docs.discord.food/resources/store#get-virtual-currency-balance
