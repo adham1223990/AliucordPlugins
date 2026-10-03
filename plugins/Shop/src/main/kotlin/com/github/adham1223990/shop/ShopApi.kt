@@ -118,6 +118,11 @@ internal object ShopApi {
 
     // Purchases a collectible SKU using the user's Orbs balance.
     // https://docs.discord.food/resources/store#redeem-virtual-currency
+    //
+    // The response body is NOT always a JSON object: Discord sometimes answers with a JSON
+    // ARRAY of the granted entries (e.g. [{"id":...,"sku_id":...}]) instead of a single object.
+    // A plain JSONObject(text) throws on that shape even though the redeem already succeeded,
+    // which used to surface as a false "Could not redeem" error. We now accept either shape.
     fun redeemWithOrbs(token: String, skuId: String): JSONObject {
         return Http.Request
             .newDiscordRNRequest("/virtual-currency/skus/$skuId/redeem", "POST")
@@ -130,7 +135,11 @@ internal object ShopApi {
                         "Discord returned HTTP ${response.statusCode}: ${response.text()}"
                     }
                     val text = response.text()
-                    if (hasText(text)) JSONObject(text) else JSONObject()
+                    if (!hasText(text)) return@use JSONObject()
+                    runCatching { JSONObject(text) }.getOrElse {
+                        val array = JSONArray(text)
+                        JSONObject().put("entries", array)
+                    }
                 }
             }
     }
