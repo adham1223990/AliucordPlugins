@@ -2,6 +2,7 @@ package com.github.adham1223990.shop
 
 import android.app.AlertDialog
 import android.content.Context
+import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -9,6 +10,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.RelativeLayout
@@ -38,12 +40,18 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
     private val previews = mutableMapOf<String, String?>()
     private val pendingPreviews = mutableMapOf<String, MutableList<(String?) -> Unit>>()
 
-    // Orbs: balance pill + exclusive filter (root collections screen only).
+    // Orbs: balance pill + Shop Menu filter (root collections screen only).
     private var orbsBalance: Int? = null
     private var allCategories: List<JSONObject> = emptyList()
-    private var orbsOnlyFilter = false
+    private var sortMode = SortMode.FEATURED
     private var orbsRow: TextView? = null
     private var filterButton: Button? = null
+
+    private enum class SortMode(val label: String) {
+        FEATURED("Featured"),
+        ALL("Shop All"),
+        ORBS("Orbs Exclusives"),
+    }
 
     // Orbs: purchase button (product detail screen only).
     private var purchaseButton: Button? = null
@@ -95,6 +103,8 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
         val column = ((view as ViewGroup).getChildAt(1) as ViewGroup).getChildAt(0) as ViewGroup
         header = column.getChildAt(0) as TextView
         status = column.getChildAt(1) as TextView
+        header.setTextColor(Color.WHITE)
+        status.setTextColor(Color.WHITE)
         list = view.findViewById(Utils.getResId("authorized_apps_list", "id"))
         list.layoutManager = LinearLayoutManager(view.context)
         product?.let {
@@ -111,9 +121,11 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
             show(ShopApi.products(it), 1)
             return
         }
+        // The Orbs balance + Shop Menu row goes in at index 0, before the header/status text,
+        // so it's the very first thing visible under the toolbar and never requires scrolling.
+        addOrbsRow(column)
         header.text = "COLLECTIONS"
         status.setOnClickListener { load() }
-        addOrbsRow(column)
         load()
     }
 
@@ -126,6 +138,7 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
 
         val button = Button(column.context).apply {
             text = "Redeem for $orbsPrice Orbs"
+            setTextColor(Color.WHITE)
         }
         button.setOnClickListener { confirmPurchase(skuId, orbsPrice) }
         column.addView(button)
@@ -173,8 +186,9 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
         }
     }
 
-    // Adds the Orbs balance pill and the "Orbs Exclusive" filter toggle above the collections
-    // list. Only used on the root screen (no category/product selected yet).
+    // Adds the Orbs balance pill and the "Shop Menu" filter button (Featured / Shop All /
+    // Orbs Exclusives — matching Discord's own shop menu) at the very top of the column, above
+    // the header/status text. Only used on the root screen (no category/product selected yet).
     private fun addOrbsRow(column: ViewGroup) {
         val ctx = column.context
         val row = LinearLayout(ctx).apply {
@@ -182,20 +196,46 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        val balanceText = TextView(ctx).apply { text = "Orbs: …" }
+        val balanceText = TextView(ctx).apply {
+            text = "Orbs: …"
+            setTextColor(Color.WHITE)
+        }
         row.addView(balanceText)
         orbsRow = balanceText
 
-        val toggle = Button(ctx).apply { text = "Orbs Exclusive" }
-        toggle.setOnClickListener {
-            orbsOnlyFilter = !orbsOnlyFilter
-            applyOrbsFilter()
+        val menuButton = Button(ctx).apply {
+            text = "Shop Menu ▾"
+            setTextColor(Color.WHITE)
         }
-        row.addView(toggle)
-        filterButton = toggle
+        menuButton.setOnClickListener { showShopMenu(ctx) }
+        row.addView(menuButton)
+        filterButton = menuButton
 
-        column.addView(row)
+        column.addView(row, 0)
         loadOrbsBalance()
+    }
+
+    // Shows the same three options as Discord's own "Shop Menu" sheet (Featured, Shop All,
+    // Orbs Exclusives) as a single-choice dialog, with a checkmark on the active one.
+    private fun showShopMenu(ctx: Context) {
+        val options = SortMode.values()
+        val labels = options.map { it.label }.toTypedArray()
+        val adapter = object : ArrayAdapter<String>(ctx, android.R.layout.simple_list_item_single_choice, labels) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent)
+                (view as? TextView)?.setTextColor(Color.WHITE)
+                return view
+            }
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle("Shop Menu")
+            .setSingleChoiceItems(adapter, options.indexOf(sortMode)) { dialog, which ->
+                sortMode = options[which]
+                dialog.dismiss()
+                applySortMode()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun loadOrbsBalance() {
@@ -211,13 +251,19 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
         }
     }
 
-    // Re-renders the root collections list filtered to Orbs-exclusive categories only, or shows
-    // all categories again when the filter is toggled off.
-    private fun applyOrbsFilter() {
+    // Re-renders the root collections list for the selected Shop Menu option: Featured keeps
+    // the API's natural order, Shop All sorts every collection alphabetically, and Orbs
+    // Exclusives filters down to collections marked Orbs-exclusive (including the ones merged
+    // in from the separate Orbs tab — see ShopApi.orbsCategories).
+    private fun applySortMode() {
         filterButton?.isEnabled = false
-        filterButton?.text = if (orbsOnlyFilter) "Orbs Exclusive ✓" else "Orbs Exclusive"
+        filterButton?.text = "Shop Menu: ${sortMode.label} ▾"
         filterButton?.isEnabled = true
-        val filtered = if (orbsOnlyFilter) allCategories.filter(ShopApi::isOrbsExclusive) else allCategories
+        val filtered = when (sortMode) {
+            SortMode.FEATURED -> allCategories
+            SortMode.ALL -> allCategories.sortedBy { it.optString("name") }
+            SortMode.ORBS -> allCategories.filter(ShopApi::isOrbsExclusive)
+        }
         status.text = if (filtered.isEmpty()) {
             "No Orbs-exclusive collections right now. Tap to refresh."
         } else {
@@ -237,7 +283,11 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
         status.text = "Loading collections…"
         val current = generation
         worker.execute {
-            val result = runCatching { ShopApi.categories(token) }
+            val result = runCatching {
+                val base = ShopApi.categories(token)
+                val orbs = runCatching { ShopApi.orbsCategories(token) }.getOrDefault(emptyList())
+                ShopApi.mergeOrbsCategories(base, orbs)
+            }
             main.post {
                 if (bound == null || closed || generation != current) return@post
                 loading = false
@@ -252,7 +302,7 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
                         if (it.isEmpty()) {
                             status.text = "No collectibles are currently available. Tap to refresh."
                         }
-                        applyOrbsFilter()
+                        applySortMode()
                     }.onFailure {
                         status.text = "Could not load the Shop. ${it.message.orEmpty()} Tap to retry."
                     }
@@ -274,12 +324,20 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
             override fun onBindViewHolder(holder: Card, position: Int) {
                 val item = items[position]
                 holder.itemView.tag = item
+                holder.name.setTextColor(Color.WHITE)
+                holder.details.setTextColor(Color.WHITE)
                 val widePreview = mode == 0 || (mode == 2 && item.optInt("type", -1) == 2)
                 holder.name.text =
                     if (mode == 2) ShopApi.itemName(item) else item.optString("name")
+                // Show the Orbs price right in the list (mode 1, product rows) so you can see
+                // what something costs without opening it first.
+                val orbsPrice = if (mode == 1) ShopApi.orbsPrice(item) else null
                 holder.details.text = when (mode) {
                     0 -> "${ShopApi.products(item).size} products"
-                    1 -> "${ShopApi.typeName(item)} · ${ShopApi.summary(item)}"
+                    1 -> {
+                        val base = "${ShopApi.typeName(item)} · ${ShopApi.summary(item)}"
+                        if (orbsPrice != null) "$base · $orbsPrice Orbs" else base
+                    }
                     else -> ShopApi.typeName(item)
                 }
                 val url = when (mode) {
