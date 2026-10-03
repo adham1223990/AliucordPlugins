@@ -10,7 +10,6 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.RelativeLayout
@@ -220,16 +219,12 @@ class ShopPage : AppFragment(Utils.getResId("widget_settings_authorized_apps", "
     private fun showShopMenu(ctx: Context) {
         val options = SortMode.values()
         val labels = options.map { it.label }.toTypedArray()
-        val adapter = object : ArrayAdapter<String>(ctx, android.R.layout.simple_list_item_single_choice, labels) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val view = super.getView(position, convertView, parent)
-                (view as? TextView)?.setTextColor(Color.WHITE)
-                return view
-            }
-        }
+        // This specific dialog renders with a light background on this build, so its text
+        // stays the default (dark) colour here — forcing white would make it unreadable, as
+        // it did before. The "white text" request applies to the dark Shop screens, not this.
         AlertDialog.Builder(ctx)
             .setTitle("Shop Menu")
-            .setSingleChoiceItems(adapter, options.indexOf(sortMode)) { dialog, which ->
+            .setSingleChoiceItems(labels, options.indexOf(sortMode)) { dialog, which ->
                 sortMode = options[which]
                 dialog.dismiss()
                 applySortMode()
