@@ -116,28 +116,65 @@ class SoundboardPage(
         loadSounds()
     }
 
+    // Bumped on every loadSounds() call so a stale background load (from a previous tap on
+    // Reload) can tell it's no longer the current one and stop appending to the list instead of
+    // racing the newer load.
+    private var loadGeneration = 0
+
     // Loads the default sounds plus every currently-joined server's own sounds -- the same set
     // Discord's own Soundboard sheet shows -- instead of only the one server the caller happened
     // to be in. Guild ids come straight from the local guild store (already cached on-device by
     // the gateway), so no extra request is needed just to know which servers to ask about.
+    //
+    // Each section (Default, then one per server) is fetched one at a time and pushed onto the
+    // screen as soon as it arrives, exactly like Discord's own Soundboard sheet: whatever has
+    // loaded so far is already visible and tappable while the rest keeps loading quietly in the
+    // background, instead of leaving the whole page stuck on "Loading…" until every server has
+    // answered.
     private fun loadSounds() {
+        val generation = ++loadGeneration
+        allRows = emptyList()
+        shownRows = emptyList()
+        list.adapter?.notifyDataSetChanged()
         status.text = "Loading sounds…"
+
         val guildIds = runCatching {
             StoreStream.getGuilds().getGuilds().keys.map { it.toString() }
         }.getOrElse {
             logger.error("Failed to read the local guild list", it)
             emptyList()
         }
+
         worker.execute {
+            fun isStale() = closed || generation != loadGeneration
+
+            fun publish(newRows: List<Row>, stillLoading: Boolean) {
+                if (newRows.isEmpty() && stillLoading) return
+                main.post {
+                    if (isStale()) return@post
+                    if (newRows.isNotEmpty()) {
+                        allRows = allRows + newRows
+                        filterRows(searchInput.text?.toString().orEmpty())
+                    }
+                    val soundCount = allRows.count { it is Row.Sound }
+                    val serverCount = allRows.count { it is Row.Header }
+                    status.text = when {
+                        stillLoading && soundCount == 0 -> "Loading sounds…"
+                        stillLoading -> "$soundCount sounds across $serverCount section(s) so far — still loading the rest…"
+                        soundCount == 0 -> "No sounds found on any of your servers. Tap Reload to try again."
+                        else -> "$soundCount sounds across $serverCount section(s). " +
+                            "Enter a voice channel ID above, then tap a sound to play it."
+                    }
+                }
+            }
+
             val defaults = runCatching { SoundboardApi.defaultSounds() }.getOrElse {
                 logger.error("Failed to load default soundboard sounds", it)
                 emptyList()
             }
-
-            val rows = mutableListOf<Row>()
+            if (isStale()) return@execute
             if (defaults.isNotEmpty()) {
-                rows.add(Row.Header("Default"))
-                defaults.forEach { rows.add(Row.Sound(it)) }
+                publish(listOf(Row.Header("Default")) + defaults.map { Row.Sound(it) }, stillLoading = true)
             }
 
             // Sorting by name keeps the server list in a stable, predictable order across
@@ -150,30 +187,18 @@ class SoundboardPage(
             }.sortedBy { it.second.lowercase() }
 
             for ((guildId, guildName) in sortedGuilds) {
-                if (closed) break
+                if (isStale()) return@execute
                 val sounds = runCatching { SoundboardApi.guildSounds(guildId) }.getOrElse {
                     logger.error("Failed to load soundboard sounds for guild $guildId", it)
                     emptyList()
                 }
+                if (isStale()) return@execute
                 if (sounds.isNotEmpty()) {
-                    rows.add(Row.Header(guildName))
-                    sounds.forEach { rows.add(Row.Sound(it)) }
+                    publish(listOf(Row.Header(guildName)) + sounds.map { Row.Sound(it) }, stillLoading = true)
                 }
             }
 
-            main.post {
-                if (closed) return@post
-                allRows = rows
-                val soundCount = rows.count { it is Row.Sound }
-                val serverCount = rows.count { it is Row.Header }
-                status.text = if (soundCount == 0) {
-                    "No sounds found on any of your servers. Tap Reload to try again."
-                } else {
-                    "$soundCount sounds across $serverCount section(s). " +
-                        "Enter a voice channel ID above, then tap a sound to play it."
-                }
-                filterRows(searchInput.text?.toString().orEmpty())
-            }
+            publish(emptyList(), stillLoading = false)
         }
     }
 
