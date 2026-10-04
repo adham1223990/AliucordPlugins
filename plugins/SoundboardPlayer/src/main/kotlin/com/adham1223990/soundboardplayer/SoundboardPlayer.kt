@@ -83,10 +83,12 @@ class SoundboardPlayer : Plugin() {
     private fun addSoundboardButton(view: VoiceControlsSheetView, model: CallModel?) {
         if (view.findViewWithTag<View>(buttonTag) != null) return
 
+        // ChannelWrapper.id / .guildId are properties on a ChannelWrapper INSTANCE, not static
+        // functions that take the channel as a parameter — must wrap the channel first.
         val channel = runCatching { model?.getChannel() }.getOrNull()
-        val channelId = channel?.let { runCatching { ChannelWrapper.getId(it).toString() }.getOrNull() }
+        val channelId = channel?.let { runCatching { ChannelWrapper(it).id.toString() }.getOrNull() }
         val guildId = channel?.let {
-            runCatching { ChannelWrapper.getGuildId(it) }.getOrNull()?.takeIf { it != 0L }?.toString()
+            runCatching { ChannelWrapper(it).guildId }.getOrNull()?.takeIf { it != 0L }?.toString()
         }
 
         val button = Button(view.context).apply {
