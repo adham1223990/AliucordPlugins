@@ -6,9 +6,10 @@ import android.widget.Button
 import android.widget.LinearLayout
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
-import com.aliucord.api.CommandsAPI
+import com.aliucord.api.CommandsAPI.CommandResult
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
+import com.aliucord.wrappers.ChannelWrapper
 import com.discord.widgets.voice.controls.VoiceControlsSheetView
 import com.discord.widgets.voice.model.CallModel
 import kotlin.jvm.functions.Function0
@@ -29,6 +30,7 @@ class SoundboardPlayer : Plugin() {
     private val buttonTag = "soundboard_player_button".hashCode()
 
     override fun start(context: Context) {
+        // تسجيل الأمر باتباع نمط CommandsAPI.CommandResult
         try {
             commands.registerCommand(
                 "soundboard",
@@ -45,7 +47,7 @@ class SoundboardPlayer : Plugin() {
                         Utils.showToast("Failed to open Soundboard: ${it.message}", true)
                     }
                 }
-                CommandsAPI.CommandResult("Opening Soundboard…", null, false)
+                CommandResult("Opening Soundboard…", null, false)
             }
             logger.info("SoundboardPlayer: registered /soundboard command")
         } catch (e: Throwable) {
@@ -53,6 +55,7 @@ class SoundboardPlayer : Plugin() {
             Utils.showToast("SoundboardPlayer: couldn't register the /soundboard command, plugin needs an update.", false)
         }
 
+        // حقن الزر في شريط أزرار المكالمة
         try {
             val configureInviteButtonsMethod = VoiceControlsSheetView::class.java.getDeclaredMethod(
                 "configureInviteButtons",
@@ -81,8 +84,10 @@ class SoundboardPlayer : Plugin() {
         if (view.findViewWithTag<View>(buttonTag) != null) return
 
         val channel = runCatching { model?.getChannel() }.getOrNull()
-        val channelId = runCatching { channel?.id?.toString() }.getOrNull()
-        val guildId = runCatching { channel?.guildId?.toString() }.getOrNull()
+        val channelId = channel?.let { runCatching { ChannelWrapper.getId(it).toString() }.getOrNull() }
+        val guildId = channel?.let {
+            runCatching { ChannelWrapper.getGuildId(it) }.getOrNull()?.takeIf { it != 0L }?.toString()
+        }
 
         val button = Button(view.context).apply {
             text = "Soundboard"
