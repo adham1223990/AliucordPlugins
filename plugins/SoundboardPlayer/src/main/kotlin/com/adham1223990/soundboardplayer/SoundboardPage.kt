@@ -1,7 +1,8 @@
 package com.adham1223990.soundboardplayer
 
 import android.content.Context
-import android.os.Bundle
+import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
@@ -13,17 +14,29 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.appcompat.widget.Toolbar
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.aliucord.Logger
 import com.aliucord.Utils
 import com.discord.app.AppFragment
+import com.discord.stores.StoreStream
 import java.util.concurrent.Executors
 
+// One row in the flat list backing the RecyclerView: either a section header (a server's name,
+// or "Default") or a playable sound belonging to the section above it.
+private sealed class Row {
+    data class Header(val title: String) : Row()
+    data class Sound(val sound: SoundboardSound) : Row()
+}
+
 /**
- * Lets the user search default + current-server soundboard sounds and play one into a voice
- * channel. [initialChannelId] / [initialGuildId] are pre-filled from the command context when
- * opened via /soundboard, but both fields stay editable in case they're wrong or missing.
+ * Lets the user search and play a soundboard sound into a voice channel, grouped by server --
+ * the default sounds plus every server the user is currently a member of that has its own
+ * soundboard sounds, same as Discord's own in-call Soundboard sheet. [initialChannelId] /
+ * [initialGuildId] are pre-filled from the command/call-button context when opened, and
+ * [initialGuildId] also doubles as "the channel's own server" for the source_guild_id rule below;
+ * [initialChannelId] stays editable in case it's wrong or missing.
  */
 class SoundboardPage(
     private val initialChannelId: String?,
@@ -36,96 +49,157 @@ class SoundboardPage(
     private var closed = false
 
     private lateinit var channelInput: EditText
-    private lateinit var guildInput: EditText
     private lateinit var searchInput: EditText
     private lateinit var status: TextView
     private lateinit var list: RecyclerView
 
-    private var allSounds: List<SoundboardSound> = emptyList()
-    private var shownSounds: List<SoundboardSound> = emptyList()
+    // allRows is the full grouped list (every server's section + Default); shownRows is that
+    // same list filtered by the search box, which is what's actually displayed.
+    private var allRows: List<Row> = emptyList()
+    private var shownRows: List<Row> = emptyList()
 
     override fun onViewBound(view: View) {
         super.onViewBound(view)
+        // This layout is borrowed from Discord's own "Authorized Apps" settings page, which
+        // carries its own Toolbar title/subtitle baked into the XML -- clear those first or
+        // "Authorized Apps" renders on top of our own "Soundboard" title.
+        val viewGroup = view as ViewGroup
+        val toolbar = viewGroup.getChildAt(0) as ViewGroup
+        (toolbar.getChildAt(0) as Toolbar).apply {
+            title = null
+            subtitle = null
+        }
         setActionBarTitle("Soundboard")
 
-        val root = view as ViewGroup
-        val column = (root.getChildAt(1) as ViewGroup).getChildAt(0) as ViewGroup
+        val column = (viewGroup.getChildAt(1) as ViewGroup).getChildAt(0) as ViewGroup
         val ctx = column.context
 
         channelInput = EditText(ctx).apply {
             hint = "Voice channel ID"
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
             setText(initialChannelId.orEmpty())
         }
         column.addView(channelInput)
 
-        guildInput = EditText(ctx).apply {
-            hint = "Current server ID (optional, loads that server's sounds)"
-            setText(initialGuildId.orEmpty())
-        }
-        column.addView(guildInput)
-
         searchInput = EditText(ctx).apply {
             hint = "Search sounds by name"
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: Editable?) {
-                    filterSounds(s?.toString().orEmpty())
+                    filterRows(s?.toString().orEmpty())
                 }
             })
         }
         column.addView(searchInput)
 
-        val reloadButton = Button(ctx).apply { text = "Reload sounds" }
+        val reloadButton = Button(ctx).apply {
+            text = "Reload sounds"
+            setTextColor(Color.WHITE)
+        }
         reloadButton.setOnClickListener { loadSounds() }
         column.addView(reloadButton)
 
-        status = TextView(ctx).apply { text = "Loading sounds…" }
+        status = TextView(ctx).apply {
+            text = "Loading sounds…"
+            setTextColor(Color.WHITE)
+        }
         column.addView(status)
 
         list = view.findViewById(Utils.getResId("authorized_apps_list", "id"))
         list.layoutManager = LinearLayoutManager(ctx)
-        list.adapter = SoundAdapter()
+        list.adapter = RowAdapter()
 
         loadSounds()
     }
 
+    // Loads the default sounds plus every currently-joined server's own sounds -- the same set
+    // Discord's own Soundboard sheet shows -- instead of only the one server the caller happened
+    // to be in. Guild ids come straight from the local guild store (already cached on-device by
+    // the gateway), so no extra request is needed just to know which servers to ask about.
     private fun loadSounds() {
         status.text = "Loading sounds…"
-        val guildId = guildInput.text?.toString()?.trim().orEmpty()
+        val guildIds = runCatching {
+            StoreStream.getGuilds().getGuilds().keys.map { it.toString() }
+        }.getOrElse {
+            logger.error("Failed to read the local guild list", it)
+            emptyList()
+        }
         worker.execute {
             val defaults = runCatching { SoundboardApi.defaultSounds() }.getOrElse {
                 logger.error("Failed to load default soundboard sounds", it)
                 emptyList()
             }
-            val guild = if (guildId.isNotEmpty()) {
-                runCatching { SoundboardApi.guildSounds(guildId) }.getOrElse {
-                    logger.error("Failed to load guild soundboard sounds for $guildId", it)
+
+            val rows = mutableListOf<Row>()
+            if (defaults.isNotEmpty()) {
+                rows.add(Row.Header("Default"))
+                defaults.forEach { rows.add(Row.Sound(it)) }
+            }
+
+            // Sorting by name keeps the server list in a stable, predictable order across
+            // reloads rather than whatever order the local store happens to iterate in.
+            val sortedGuilds = guildIds.mapNotNull { id ->
+                val name = runCatching {
+                    StoreStream.getGuilds().getGuild(id.toLong())?.name
+                }.getOrNull()
+                if (name != null) id to name else null
+            }.sortedBy { it.second.lowercase() }
+
+            for ((guildId, guildName) in sortedGuilds) {
+                if (closed) break
+                val sounds = runCatching { SoundboardApi.guildSounds(guildId) }.getOrElse {
+                    logger.error("Failed to load soundboard sounds for guild $guildId", it)
                     emptyList()
                 }
-            } else {
-                emptyList()
+                if (sounds.isNotEmpty()) {
+                    rows.add(Row.Header(guildName))
+                    sounds.forEach { rows.add(Row.Sound(it)) }
+                }
             }
+
             main.post {
                 if (closed) return@post
-                allSounds = guild + defaults
-                status.text = if (allSounds.isEmpty()) {
-                    "No sounds found. Check the server ID, or tap Reload."
+                allRows = rows
+                val soundCount = rows.count { it is Row.Sound }
+                val serverCount = rows.count { it is Row.Header }
+                status.text = if (soundCount == 0) {
+                    "No sounds found on any of your servers. Tap Reload to try again."
                 } else {
-                    "${allSounds.size} sounds loaded. Enter a voice channel ID above, then tap a sound to play it."
+                    "$soundCount sounds across $serverCount section(s). " +
+                        "Enter a voice channel ID above, then tap a sound to play it."
                 }
-                filterSounds(searchInput.text?.toString().orEmpty())
+                filterRows(searchInput.text?.toString().orEmpty())
             }
         }
     }
 
-    private fun filterSounds(query: String) {
-        shownSounds = if (query.isEmpty()) {
-            allSounds
-        } else {
-            val needle = query.lowercase()
-            allSounds.filter { it.name.lowercase().contains(needle) }
+    // Filters by sound name only; a header stays visible as long as at least one sound under
+    // it still matches, so the grouping by server is preserved while searching.
+    private fun filterRows(query: String) {
+        if (query.isEmpty()) {
+            shownRows = allRows
+            list.adapter?.notifyDataSetChanged()
+            return
         }
+        val needle = query.lowercase()
+        val result = mutableListOf<Row>()
+        var pendingHeader: Row.Header? = null
+        for (row in allRows) {
+            when (row) {
+                is Row.Header -> pendingHeader = row
+                is Row.Sound -> {
+                    if (row.sound.name.lowercase().contains(needle)) {
+                        pendingHeader?.let { result.add(it); pendingHeader = null }
+                        result.add(row)
+                    }
+                }
+            }
+        }
+        shownRows = result
         list.adapter?.notifyDataSetChanged()
     }
 
@@ -135,10 +209,10 @@ class SoundboardPage(
             Utils.showToast("Enter the voice channel ID you're connected to first.", true)
             return
         }
-        val currentGuildId = guildInput.text?.toString()?.trim().orEmpty()
-        // Only send source_guild_id when the sound belongs to a different guild than the one
-        // typed above — that's the only case the endpoint actually requires it for.
-        val sourceGuildId = if (sound.guildId != null && sound.guildId != currentGuildId) sound.guildId else null
+        // source_guild_id is only required when the sound belongs to a different server than
+        // the one the target channel is in. initialGuildId is that channel's own server, taken
+        // from the call/command context the page was opened with.
+        val sourceGuildId = if (sound.guildId != null && sound.guildId != initialGuildId) sound.guildId else null
 
         Utils.showToast("Playing ${sound.name}…", false)
         worker.execute {
@@ -161,32 +235,58 @@ class SoundboardPage(
         super.onDestroyView()
     }
 
-    private inner class SoundAdapter : RecyclerView.Adapter<SoundAdapter.Holder>() {
-        inner class Holder(val row: LinearLayout, val name: TextView, val playButton: Button) :
+    private inner class RowAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        private val typeHeader = 0
+        private val typeSound = 1
+
+        inner class HeaderHolder(val title: TextView) : RecyclerView.ViewHolder(title)
+        inner class SoundHolder(val row: LinearLayout, val name: TextView, val playButton: Button) :
             RecyclerView.ViewHolder(row)
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+        override fun getItemViewType(position: Int): Int =
+            if (shownRows[position] is Row.Header) typeHeader else typeSound
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
             val ctx = parent.context
+            if (viewType == typeHeader) {
+                val title = TextView(ctx).apply {
+                    setTextColor(Color.WHITE)
+                    setTypeface(typeface, Typeface.BOLD)
+                    textSize = 14f
+                    setPadding(32, 24, 32, 8)
+                }
+                return HeaderHolder(title)
+            }
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(32, 16, 32, 16)
             }
             val name = TextView(ctx).apply {
+                setTextColor(Color.WHITE)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            val playButton = Button(ctx).apply { text = "Play" }
+            val playButton = Button(ctx).apply {
+                text = "Play"
+                setTextColor(Color.WHITE)
+            }
             row.addView(name)
             row.addView(playButton)
-            return Holder(row, name, playButton)
+            return SoundHolder(row, name, playButton)
         }
 
-        override fun onBindViewHolder(holder: Holder, position: Int) {
-            val sound = shownSounds[position]
-            val emoji = sound.emojiName.orEmpty()
-            holder.name.text = if (emoji.isNotEmpty()) "$emoji ${sound.name}" else sound.name
-            holder.playButton.setOnClickListener { playSound(sound) }
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            when (val row = shownRows[position]) {
+                is Row.Header -> (holder as HeaderHolder).title.text = row.title
+                is Row.Sound -> {
+                    val sound = row.sound
+                    val h = holder as SoundHolder
+                    val emoji = sound.emojiName.orEmpty()
+                    h.name.text = if (emoji.isNotEmpty()) "$emoji ${sound.name}" else sound.name
+                    h.playButton.setOnClickListener { playSound(sound) }
+                }
+            }
         }
 
-        override fun getItemCount(): Int = shownSounds.size
+        override fun getItemCount(): Int = shownRows.size
     }
 }
