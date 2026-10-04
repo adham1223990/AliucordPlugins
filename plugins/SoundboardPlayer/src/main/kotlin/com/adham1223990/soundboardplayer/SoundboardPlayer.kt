@@ -6,7 +6,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
-import com.aliucord.api.commands.CommandsAPI
+import com.aliucord.api.CommandsAPI
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.discord.widgets.voice.controls.VoiceControlsSheetView
@@ -81,8 +81,8 @@ class SoundboardPlayer : Plugin() {
         if (view.findViewWithTag<View>(buttonTag) != null) return
 
         val channel = runCatching { model?.getChannel() }.getOrNull()
-        val channelId = runCatching { channel?.getId()?.toString() }.getOrNull()
-        val guildId = runCatching { channel?.getGuildId()?.toString() }.getOrNull()
+        val channelId = runCatching { channel?.id?.toString() }.getOrNull()
+        val guildId = runCatching { channel?.guildId?.toString() }.getOrNull()
 
         val button = Button(view.context).apply {
             text = "Soundboard"
