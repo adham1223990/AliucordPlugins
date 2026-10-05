@@ -22,6 +22,7 @@ import com.aliucord.Utils
 import com.discord.app.AppFragment
 import com.discord.stores.StoreStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 // One row in the flat list backing the RecyclerView: either a section header (a server's name,
 // or "Default") or a playable sound belonging to the section above it.
@@ -45,6 +46,11 @@ class SoundboardPage(
 
     private val logger = Logger("SoundboardPlayer")
     private val worker = Executors.newSingleThreadExecutor()
+    // Separate pool for loading sounds: one request per server, fired off together instead of
+    // one-at-a-time, so a server near the end of the (alphabetical) list doesn't have to wait
+    // for every server before it to finish answering first. 6 at once is enough to make the
+    // wait feel instant without hammering Discord with dozens of simultaneous requests.
+    private val fetchPool = Executors.newFixedThreadPool(6)
     private val main = Handler(Looper.getMainLooper())
     private var closed = false
 
@@ -117,7 +123,7 @@ class SoundboardPage(
     }
 
     // Bumped on every loadSounds() call so a stale background load (from a previous tap on
-    // Reload) can tell it's no longer the current one and stop appending to the list instead of
+    // Reload) can tell it's no longer the current one and stop touching the list instead of
     // racing the newer load.
     private var loadGeneration = 0
 
@@ -126,11 +132,12 @@ class SoundboardPage(
     // to be in. Guild ids come straight from the local guild store (already cached on-device by
     // the gateway), so no extra request is needed just to know which servers to ask about.
     //
-    // Each section (Default, then one per server) is fetched one at a time and pushed onto the
-    // screen as soon as it arrives, exactly like Discord's own Soundboard sheet: whatever has
-    // loaded so far is already visible and tappable while the rest keeps loading quietly in the
-    // background, instead of leaving the whole page stuck on "Loading…" until every server has
-    // answered.
+    // Each section's request (Default, then one per server) is fired off in PARALLEL on
+    // [fetchPool] instead of one after another. One-at-a-time meant a server with sounds near
+    // the end of the (alphabetical) list had to wait for every server before it to answer first
+    // -- which is exactly what looked like "stuck until everything finishes". Whichever section
+    // answers first is pushed onto the screen immediately and is already tappable while the
+    // rest keep loading in the background.
     private fun loadSounds() {
         val generation = ++loadGeneration
         allRows = emptyList()
@@ -144,61 +151,79 @@ class SoundboardPage(
             logger.error("Failed to read the local guild list", it)
             emptyList()
         }
+        // Resolving names is a local, in-memory lookup (no network), so this stays cheap even
+        // though the sections themselves will land out of this order as requests race.
+        val sortedGuilds = guildIds.mapNotNull { id ->
+            val name = runCatching { StoreStream.getGuilds().getGuild(id.toLong())?.name }.getOrNull()
+            if (name != null) id to name else null
+        }.sortedBy { it.second.lowercase() }
 
-        worker.execute {
-            fun isStale() = closed || generation != loadGeneration
+        // +1 for the Default-sounds request.
+        val remaining = AtomicInteger(1 + sortedGuilds.size)
 
-            fun publish(newRows: List<Row>, stillLoading: Boolean) {
-                if (newRows.isEmpty() && stillLoading) return
+        fun isStale() = closed || generation != loadGeneration
+
+        fun updateStatus(stillLoading: Boolean) {
+            val soundCount = allRows.count { it is Row.Sound }
+            val serverCount = allRows.count { it is Row.Header }
+            status.text = when {
+                stillLoading && soundCount == 0 -> "Loading sounds…"
+                stillLoading -> "$soundCount sounds across $serverCount section(s) so far — still loading the rest…"
+                soundCount == 0 -> "No sounds found on any of your servers. Tap Reload to try again."
+                else -> "$soundCount sounds across $serverCount section(s). " +
+                    "Enter a voice channel ID above, then tap a sound to play it."
+            }
+        }
+
+        fun publishSection(sectionRows: List<Row>) {
+            if (sectionRows.isEmpty()) return
+            main.post {
+                if (isStale()) return@post
+                allRows = allRows + sectionRows
+                filterRows(searchInput.text?.toString().orEmpty())
+                updateStatus(stillLoading = remaining.get() > 0)
+            }
+        }
+
+        fun finishOne() {
+            if (remaining.decrementAndGet() == 0) {
                 main.post {
                     if (isStale()) return@post
-                    if (newRows.isNotEmpty()) {
-                        allRows = allRows + newRows
-                        filterRows(searchInput.text?.toString().orEmpty())
-                    }
-                    val soundCount = allRows.count { it is Row.Sound }
-                    val serverCount = allRows.count { it is Row.Header }
-                    status.text = when {
-                        stillLoading && soundCount == 0 -> "Loading sounds…"
-                        stillLoading -> "$soundCount sounds across $serverCount section(s) so far — still loading the rest…"
-                        soundCount == 0 -> "No sounds found on any of your servers. Tap Reload to try again."
-                        else -> "$soundCount sounds across $serverCount section(s). " +
-                            "Enter a voice channel ID above, then tap a sound to play it."
-                    }
+                    updateStatus(stillLoading = false)
                 }
             }
+        }
 
+        fetchPool.execute {
+            if (isStale()) {
+                finishOne()
+                return@execute
+            }
             val defaults = runCatching { SoundboardApi.defaultSounds() }.getOrElse {
                 logger.error("Failed to load default soundboard sounds", it)
                 emptyList()
             }
-            if (isStale()) return@execute
-            if (defaults.isNotEmpty()) {
-                publish(listOf(Row.Header("Default")) + defaults.map { Row.Sound(it) }, stillLoading = true)
+            if (!isStale() && defaults.isNotEmpty()) {
+                publishSection(listOf(Row.Header("Default")) + defaults.map { Row.Sound(it) })
             }
+            finishOne()
+        }
 
-            // Sorting by name keeps the server list in a stable, predictable order across
-            // reloads rather than whatever order the local store happens to iterate in.
-            val sortedGuilds = guildIds.mapNotNull { id ->
-                val name = runCatching {
-                    StoreStream.getGuilds().getGuild(id.toLong())?.name
-                }.getOrNull()
-                if (name != null) id to name else null
-            }.sortedBy { it.second.lowercase() }
-
-            for ((guildId, guildName) in sortedGuilds) {
-                if (isStale()) return@execute
+        for ((guildId, guildName) in sortedGuilds) {
+            fetchPool.execute {
+                if (isStale()) {
+                    finishOne()
+                    return@execute
+                }
                 val sounds = runCatching { SoundboardApi.guildSounds(guildId) }.getOrElse {
                     logger.error("Failed to load soundboard sounds for guild $guildId", it)
                     emptyList()
                 }
-                if (isStale()) return@execute
-                if (sounds.isNotEmpty()) {
-                    publish(listOf(Row.Header(guildName)) + sounds.map { Row.Sound(it) }, stillLoading = true)
+                if (!isStale() && sounds.isNotEmpty()) {
+                    publishSection(listOf(Row.Header(guildName)) + sounds.map { Row.Sound(it) })
                 }
+                finishOne()
             }
-
-            publish(emptyList(), stillLoading = false)
         }
     }
 
@@ -256,6 +281,7 @@ class SoundboardPage(
         closed = true
         list.adapter = null
         worker.shutdownNow()
+        fetchPool.shutdownNow()
         main.removeCallbacksAndMessages(null)
         super.onDestroyView()
     }
