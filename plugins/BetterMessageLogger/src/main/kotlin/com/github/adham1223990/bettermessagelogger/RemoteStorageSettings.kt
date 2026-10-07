@@ -8,7 +8,7 @@ import com.aliucord.api.SettingsAPI
 import com.google.android.material.textfield.TextInputLayout
 
 internal fun remoteStorageStatus(settings: SettingsAPI): String {
-    val config = RemoteStorage.config(settings) ?: return "Off · nothing saved on this device while the database is on"
+    val config = RemoteStorage.config(settings) ?: return "Off · media is saved on this device"
     return RemoteStorage.label(config.provider)
 }
 
@@ -59,9 +59,9 @@ internal fun showRemoteStorageDialog(
     content.addView(holder, LinearLayout.LayoutParams(-1, -2))
     content.addView(
         ui.caption(
-            "Deleted images and videos are uploaded to your own account and are not kept on this device. " +
+            "Deleted images and videos are uploaded to your own account instead of being kept on this device. " +
                 "Cloudinary: create an unsigned upload preset. Supabase: use a public bucket. " +
-                "Used only while \"Save logs across restarts\" is on; otherwise media is saved in the device folder.",
+                "Used only while \"Save logs across restarts\" is on. Without a cloud account, media is saved in the device folder and kept across restarts.",
         ),
     )
     render()
