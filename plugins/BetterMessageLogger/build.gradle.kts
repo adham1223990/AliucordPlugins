@@ -8,6 +8,6 @@ aliucord {
         * Initial plugin release.
         """.trimIndent()
     )
-    author("Adham")
+    author("Adham", 1001222848716738570L, hyperlink = true)
     deploy.set(true)
 }
