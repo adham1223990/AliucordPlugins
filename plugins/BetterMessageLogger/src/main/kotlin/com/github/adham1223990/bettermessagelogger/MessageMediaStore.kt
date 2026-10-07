@@ -21,9 +21,8 @@ import java.util.concurrent.Executors
  * Keeps image and video attachments of deleted messages. Discord purges deleted attachments from its CDN
  * almost immediately and signed URLs expire, so media is downloaded into a bounded temporary cache when
  * messages arrive. Once a message is deleted, one of two things happens:
- * - database on ("links only"): nothing is kept on the device. With a cloud account configured the media is
- *   uploaded and only its URL is remembered; without one, only the links stored in the database remain.
- * - database off: the media is moved into the permanent media folder on the device.
+ * - cloud account configured (and database on): the media is uploaded and only its URL is remembered.
+ * - otherwise: the media is moved into the permanent media folder on the device, so it survives restarts.
  */
 internal class MessageMediaStore(
     private val root: File,
@@ -44,7 +43,7 @@ internal class MessageMediaStore(
     private val remoteIndex = RemoteIndex(File(root, REMOTE_INDEX))
     private val uploading = HashSet<String>()
 
-    // Deleted messages handled this session, mapped to whether only links are kept (database on).
+    // Deleted messages handled this session, mapped to whether their media goes to the cloud (true) or the device (false).
     // Also protects fresh downloads from a concurrent sweep. Guarded by itself.
     private val attempted = HashMap<Long, Boolean>()
 
@@ -96,7 +95,7 @@ internal class MessageMediaStore(
             if (linksOnly != null) {
                 if (linksOnly) {
                     val config = remote()
-                    if (config != null) uploadPending(id, directory, attachments, config) else directory.deleteRecursively()
+                    if (config != null) uploadPending(id, directory, attachments, config) else promote(directory, target(id))
                 } else {
                     promote(directory, target(id))
                 }
@@ -109,21 +108,22 @@ internal class MessageMediaStore(
     }
 
     /**
-     * Stores media of a deleted message: as links only when [linksOnly] (nothing is written to the device),
-     * otherwise in the permanent media folder. Each message is handled once per mode.
-     * Never blocks the calling thread.
+     * Stores media of a deleted message: uploaded to the user's cloud account when [linksOnly] is set and a
+     * cloud account is configured, otherwise in the permanent media folder on the device (survives restarts).
+     * Each message is handled once per mode. Never blocks the calling thread.
      */
     fun saveAsync(record: MessageRecord, linksOnly: Boolean) {
         if (!record.deleted) return
+        val config = if (linksOnly) remote() else null
+        val cloud = config != null
         synchronized(attempted) {
-            if (attempted[record.id] == linksOnly) return
-            attempted[record.id] = linksOnly
+            if (attempted[record.id] == cloud) return
+            attempted[record.id] = cloud
         }
         val directory = target(record.id)
-        val config = if (linksOnly) remote() else null
         enqueue(executor, "save logged media") {
-            if (linksOnly) {
-                if (config != null) saveRemote(record, config) else File(pending, record.id.toString()).deleteRecursively()
+            if (config != null) {
+                saveRemote(record, config)
                 return@enqueue
             }
             promote(File(pending, record.id.toString()), directory)
