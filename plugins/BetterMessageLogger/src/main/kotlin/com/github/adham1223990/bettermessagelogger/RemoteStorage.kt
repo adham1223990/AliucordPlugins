@@ -34,7 +34,7 @@ internal object RemoteStorage {
     fun config(settings: SettingsAPI): RemoteConfig? {
         val provider = settings.getString(PROVIDER, "")
         if (provider != CLOUDINARY && provider != SUPABASE) return null
-        val values = hints(provider).indices.map { settings.getString(key(provider, it), "").trim() }
+        val values = hints(provider).mapIndexed { index, _ -> settings.getString(key(provider, index), "").trim() }
         return if (values.any { it.isEmpty() }) null else RemoteConfig(provider, values)
     }
 
