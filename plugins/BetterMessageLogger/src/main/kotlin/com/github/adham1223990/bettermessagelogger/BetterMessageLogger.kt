@@ -458,7 +458,10 @@ class BetterMessageLogger : Plugin() {
             logger.error("Could not $action", error)
             if (!databaseErrorShown && running) {
                 databaseErrorShown = true
-                Utils.mainThread.post { if (running) Utils.showToast("BetterMessageLogger: could not $action", true) }
+                val reason = error.message?.take(120) ?: error.javaClass.simpleName
+                Utils.mainThread.post {
+                    if (running) Utils.showToast("BetterMessageLogger: could not $action ($reason)", true)
+                }
             }
         }
         database = db
@@ -483,8 +486,8 @@ class BetterMessageLogger : Plugin() {
                 }.onFailure {
                     synchronized(lock) {
                         databaseReady = false
+                        // Keep the user's choice in settings so a failed open never silently turns saving off.
                         databaseEnabled = false
-                        settings.setBool("database", false)
                         if (database === db) database = null
                         db.stop()
                     }
