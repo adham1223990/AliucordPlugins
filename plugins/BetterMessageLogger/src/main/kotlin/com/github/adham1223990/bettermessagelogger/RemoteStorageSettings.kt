@@ -23,7 +23,7 @@ internal fun showRemoteStorageDialog(
     var provider = settings.getString(RemoteStorage.PROVIDER, "").ifEmpty { RemoteStorage.CLOUDINARY }
     val saved = HashMap<String, String>()
     for (name in listOf(RemoteStorage.CLOUDINARY, RemoteStorage.SUPABASE)) {
-        for (index in 0..2) saved[RemoteStorage.key(name, index)] = settings.getString(RemoteStorage.key(name, index), "")
+        listOf(0, 1, 2).forEach { index -> saved[RemoteStorage.key(name, index)] = settings.getString(RemoteStorage.key(name, index), "") }
     }
     val content = ui.dialogContent()
     val holder = ui.column()
@@ -77,7 +77,7 @@ internal fun showRemoteStorageDialog(
         }
         .positive("Save") {
             capture()
-            val values = RemoteStorage.hints(provider).indices.map { saved[RemoteStorage.key(provider, it)].orEmpty() }
+            val values = RemoteStorage.hints(provider).mapIndexed { index, _ -> saved[RemoteStorage.key(provider, index)].orEmpty() }
             val empty = values.indexOfFirst { it.isEmpty() }
             when {
                 empty >= 0 -> {
