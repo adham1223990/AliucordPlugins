@@ -180,7 +180,8 @@ internal class MessageLoggerDatabase(
             put("edited_timestamp", record.editedTimestamp)
             put("deleted", if (record.deleted) 1 else 0)
             put("deleted_timestamp", record.deletedTimestamp)
-            put("payload", record.serializedMessage())
+            // A payload that fails to serialize must not stop the text, edits and deleted state from being saved.
+            put("payload", runCatching { record.serializedMessage() }.getOrNull())
         }
         // REPLACE deletes the existing row, which would cascade-delete its edit history.
         db.insertWithOnConflict("messages", null, values, SQLiteDatabase.CONFLICT_IGNORE)
