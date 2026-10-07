@@ -354,7 +354,7 @@ internal class MessageMediaStore(
         val type = attachment.e()
         if (type != MessageAttachmentType.IMAGE && type != MessageAttachmentType.VIDEO) return null
         // Keep the original extension; Discord derives the attachment type from it.
-        val extension = Uri.parse(url).lastPathSegment.orEmpty().substringAfterLast('.', "").toLowerCase(Locale.ROOT)
+        val extension = Uri.parse(url).lastPathSegment.orEmpty().substringAfterLast('.', "").lowercase(Locale.ROOT)
         if (extension.isEmpty() || extension.length > 5 || !extension.all { it in 'a'..'z' || it in '0'..'9' }) {
             return null
         }
