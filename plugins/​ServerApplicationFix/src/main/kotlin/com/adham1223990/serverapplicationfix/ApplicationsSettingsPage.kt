@@ -34,7 +34,7 @@ class ApplicationsSettingsPage(
         setActionBarTitle("View Applications Status")
         setActionBarSubtitle("Servers you applied to & pending applications")
 
-        val container = layout
+        val container = linearLayout
         container.removeAllViews()
         container.setBackgroundColor(FormStyle.PAGE_BG_COLOR)
         val pad = FormStyle.dp(ctx, 16)
@@ -274,7 +274,7 @@ class ApplicationsSettingsPage(
             val members = StoreStream.getGuilds().members
             for ((guildId, guild) in guilds) {
                 val myMember = members[guildId]?.get(meId)
-                if (myMember != null && myMember.isPending) {
+                if (myMember != null && isMemberPending(myMember)) {
                     val existing = ApplicationStore.getByGuildId(settings, guildId)
                     if (existing == null) {
                         ApplicationStore.upsert(
@@ -291,6 +291,18 @@ class ApplicationsSettingsPage(
             }
         } catch (_: Throwable) {
         }
+    }
+
+    /** The pending flag is exposed under different getter names depending on the Discord build. */
+    private fun isMemberPending(member: Any): Boolean {
+        for (name in listOf("getPending", "isPending")) {
+            try {
+                val result = member.javaClass.getMethod(name).invoke(member)
+                if (result is Boolean) return result
+            } catch (_: Throwable) {
+            }
+        }
+        return false
     }
 
     private fun createSmallButton(
@@ -339,7 +351,7 @@ class PluginTextColorSettingsPage(
         setActionBarTitle("ServerApplicationFix Settings")
         setActionBarSubtitle("Text Color Customization")
 
-        val container = layout
+        val container = linearLayout
         container.removeAllViews()
         container.setBackgroundColor(FormStyle.PAGE_BG_COLOR)
         val pad = FormStyle.dp(ctx, 16)
