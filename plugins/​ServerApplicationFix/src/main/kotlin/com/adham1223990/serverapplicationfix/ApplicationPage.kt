@@ -38,7 +38,7 @@ class ApplicationPage(
         setActionBarTitle(initialGuildName ?: "Server Application")
         setActionBarSubtitle("View Application Status & Apply")
 
-        val container = layout
+        val container = linearLayout
         container.removeAllViews()
         container.setBackgroundColor(FormStyle.PAGE_BG_COLOR)
         val pad = FormStyle.dp(ctx, 16)
