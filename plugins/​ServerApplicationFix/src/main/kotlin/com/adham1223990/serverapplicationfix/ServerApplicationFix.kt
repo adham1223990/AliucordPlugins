@@ -13,11 +13,14 @@ import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.patcher.Hook
+import com.aliucord.patcher.PreHook
 import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
+import com.discord.widgets.guilds.join.GuildJoinHelperKt
 import com.discord.widgets.settings.WidgetSettings
 import java.util.Collections
 import java.util.WeakHashMap
+import kotlin.jvm.functions.Function1
 
 @AliucordPlugin
 class ServerApplicationFix : Plugin() {
@@ -63,6 +66,87 @@ class ServerApplicationFix : Plugin() {
 
         // 2. Patch Member Verification & Join Request widgets to fix "View Application Status"
         hookMemberVerificationWidgets()
+
+        // 3. The actual, reliable join trigger: every join path (invite link, "Join" button in
+        // a message, etc.) funnels through GuildJoinHelperKt.joinGuild(...). We wrap its onNext
+        // callback (fired once the join truly succeeds) so a pending application is detected
+        // and opened immediately, instead of depending on scraping a visible button somewhere.
+        hookGuildJoin()
+    }
+
+    private fun hookGuildJoin() {
+        val joinGuildMethod = GuildJoinHelperKt::class.java.declaredMethods
+            .firstOrNull { it.name == "joinGuild" }
+
+        if (joinGuildMethod == null) {
+            logger.error("ServerApplicationFix: joinGuild not found on GuildJoinHelperKt", null)
+            return
+        }
+
+        // The onNext(Guild) callback is always the last parameter — found by position instead
+        // of an exact parameter-type list, since the plugin build stub and the real APK don't
+        // always agree on every parameter type and a mismatched getDeclaredMethod(...) call
+        // throws silently, which is exactly how this hook went missing last time.
+        val onNextIndex = joinGuildMethod.parameterCount - 1
+        try {
+            patcher.patch(joinGuildMethod, PreHook { param ->
+                try {
+                    @Suppress("UNCHECKED_CAST")
+                    val originalOnNext = param.args[onNextIndex] as? Function1<Any?, Unit>
+                    val wrapped: (Any?) -> Unit = { guildAny ->
+                        try {
+                            originalOnNext?.invoke(guildAny)
+                        } finally {
+                            try {
+                                if (guildAny != null) {
+                                    val gid = guildAny.javaClass.getMethod("getId").invoke(guildAny) as? Long
+                                    if (gid != null && gid > 0L) onGuildJoined(gid)
+                                }
+                            } catch (e: Throwable) {
+                                logger.error("ServerApplicationFix: failed to read joined guild id", e)
+                            }
+                        }
+                    }
+                    param.args[onNextIndex] = wrapped
+                } catch (e: Throwable) {
+                    logger.error("ServerApplicationFix: failed to wrap joinGuild onNext", e)
+                }
+            })
+            logger.info("ServerApplicationFix: patched GuildJoinHelperKt.joinGuild (onNext at index $onNextIndex)")
+        } catch (e: Throwable) {
+            logger.error("ServerApplicationFix: failed to patch joinGuild", e)
+        }
+    }
+
+    // Runs off the main thread (network call), checks whether the just-joined guild actually
+    // has an active member-verification form, records it, then opens ApplicationPage.
+    private fun onGuildJoined(guildId: Long) {
+        Utils.threadPool.execute {
+            val form = ApplicationApi.fetchMemberVerificationForm(guildId).getOrNull() ?: return@execute
+            if (form.fields.isEmpty()) return@execute
+
+            val guildName = form.guildName
+                ?: StoreStream.getGuilds().guilds[guildId]?.name
+                ?: "Server $guildId"
+
+            ApplicationStore.upsert(
+                settings,
+                SavedApplicationRecord(
+                    guildId = guildId,
+                    guildName = guildName,
+                    guildIcon = form.guildIcon,
+                    requestId = form.requestId,
+                    status = form.joinRequestStatus ?: "STARTED",
+                    formDescription = form.description
+                )
+            )
+
+            Utils.mainThread.post {
+                val page = ApplicationPage(settings, guildId, guildName)
+                ApplicationsSettingsPage.openPage?.invoke(Utils.appActivity, page)
+                    ?: Utils.openPageWithProxy(Utils.appActivity, page)
+            }
+        }
     }
 
     private fun insertRow(settingsWidget: WidgetSettings) {
