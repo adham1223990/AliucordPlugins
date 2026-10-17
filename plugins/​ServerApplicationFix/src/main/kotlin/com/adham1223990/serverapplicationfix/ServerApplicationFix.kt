@@ -88,12 +88,17 @@ class ServerApplicationFix : Plugin() {
         // always agree on every parameter type and a mismatched getDeclaredMethod(...) call
         // throws silently, which is exactly how this hook went missing last time.
         val onNextIndex = joinGuildMethod.parameterCount - 1
+        // Confirmed from the real joinGuild(...) signature (GuildJoinHelperKt.java): the
+        // errorHandler (Function1<Error, Unit>) sits two parameters before onNext, with
+        // captchaPayload in between: (..., errorHandler, captchaPayload, onNext).
+        val errorHandlerIndex = onNextIndex - 2
+
         try {
             patcher.patch(joinGuildMethod, PreHook { param ->
                 try {
                     @Suppress("UNCHECKED_CAST")
                     val originalOnNext = param.args[onNextIndex] as? Function1<Any?, Unit>
-                    val wrapped: (Any?) -> Unit = { guildAny ->
+                    val wrappedOnNext: (Any?) -> Unit = { guildAny ->
                         try {
                             originalOnNext?.invoke(guildAny)
                         } finally {
@@ -107,14 +112,68 @@ class ServerApplicationFix : Plugin() {
                             }
                         }
                     }
-                    param.args[onNextIndex] = wrapped
+                    param.args[onNextIndex] = wrappedOnNext
                 } catch (e: Throwable) {
                     logger.error("ServerApplicationFix: failed to wrap joinGuild onNext", e)
                 }
+
+                // Captcha / failure visibility ONLY — the original errorHandler always runs
+                // first and completely untouched, so Discord's own native captcha challenge
+                // (and its internal retry of this same join, reusing this same handler chain)
+                // keeps working exactly as before. We just make the failure visible in our own
+                // log, since previously a captcha-gated "Oops" left nothing logged anywhere.
+                try {
+                    if (errorHandlerIndex in param.args.indices) {
+                        @Suppress("UNCHECKED_CAST")
+                        val originalErrorHandler = param.args[errorHandlerIndex] as? Function1<Any?, Unit>
+                        if (originalErrorHandler != null) {
+                            val wrappedErrorHandler: (Any?) -> Unit = { errorAny ->
+                                runCatching { logJoinError(errorAny) }
+                                    .onFailure { logger.error("ServerApplicationFix: failed to log join error", it) }
+                                originalErrorHandler.invoke(errorAny)
+                            }
+                            param.args[errorHandlerIndex] = wrappedErrorHandler
+                        }
+                    }
+                } catch (e: Throwable) {
+                    logger.error("ServerApplicationFix: failed to wrap joinGuild errorHandler", e)
+                }
             })
-            logger.info("ServerApplicationFix: patched GuildJoinHelperKt.joinGuild (onNext at index $onNextIndex)")
+            logger.info(
+                "ServerApplicationFix: patched GuildJoinHelperKt.joinGuild " +
+                    "(onNext at $onNextIndex, errorHandler at $errorHandlerIndex)"
+            )
         } catch (e: Throwable) {
             logger.error("ServerApplicationFix: failed to patch joinGuild", e)
+        }
+    }
+
+    // Best-effort, read-only inspection of the join failure so a captcha requirement (or any
+    // other rejection) shows up in our own plugin log with the server's actual error text,
+    // instead of just a silent "Oops" toast with nothing to go on.
+    private fun logJoinError(errorAny: Any?) {
+        if (errorAny == null) {
+            logger.error("ServerApplicationFix: join failed with a null error", null)
+            return
+        }
+        val text = runCatching {
+            // Most of Discord's internal Error wrappers expose getMessage()/getResponse(); try
+            // the common ones first and fall back to toString() if none are present.
+            val cls = errorAny.javaClass
+            val viaMessage = runCatching { cls.getMethod("getMessage").invoke(errorAny)?.toString() }.getOrNull()
+            val viaResponse = runCatching { cls.getMethod("getResponse").invoke(errorAny)?.toString() }.getOrNull()
+            listOfNotNull(viaMessage, viaResponse).joinToString(" | ").ifBlank { errorAny.toString() }
+        }.getOrDefault(errorAny.toString())
+
+        if (text.contains("captcha", ignoreCase = true)) {
+            logger.error(
+                "ServerApplicationFix: join requires a captcha. Discord's own captcha " +
+                    "challenge should appear now — solve it and the join will retry " +
+                    "automatically. Details: $text",
+                null
+            )
+        } else {
+            logger.error("ServerApplicationFix: join failed: $text", null)
         }
     }
 
