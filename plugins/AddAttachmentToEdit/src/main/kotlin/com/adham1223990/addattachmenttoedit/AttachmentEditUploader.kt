@@ -28,6 +28,36 @@ object AttachmentEditUploader {
         // Step 1: ask Discord for a place to upload the file. This is a normal Discord API
         // route, so it goes through newDiscordRNRequest like everything else.
         val requestBody = JSONObject().apply {
+package com.adham1223990.addattachmenttoedit
+
+import android.net.Uri
+import com.aliucord.Http
+import com.aliucord.Utils
+import com.aliucord.utils.ReflectUtils
+import com.discord.stores.StoreStream
+import com.discord.utilities.rest.RestAPI
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+
+/**
+ * Adds a new attachment to an already-sent message, following the exact same three-step flow
+ * Vencord's own AddAttachments plugin uses on desktop (src/plugins/addAttachments/index.tsx),
+ * which is the real, working way current Discord clients do this -- not the older single
+ * multipart-PATCH approach the REST docs alone would suggest.
+ */
+object AttachmentEditUploader {
+
+    private fun token(): String = RestAPI.AppHeadersProvider.INSTANCE.authToken
+        ?: throw IllegalStateException("Not signed in to Discord.")
+
+    fun addAttachment(channelId: Long, messageId: Long, imageUri: Uri) {
+        val authToken = token()
+        val (bytes, filename) = readUri(imageUri)
+
+        // Step 1: ask Discord for a place to upload the file. This is a normal Discord API
+        // route, so it goes through newDiscordRNRequest like everything else.
+        val requestBody = JSONObject().apply {
             put("files", JSONArray().apply {
                 put(JSONObject().apply {
                     put("filename", filename)
@@ -80,22 +110,32 @@ object AttachmentEditUploader {
         try {
             val message = StoreStream.getMessages().getMessage(channelId, messageId)
             // Reading the field directly through reflection instead of calling
-            // message.getAttachments()/.attachments: on this build the generated getter's
-            // return type doesn't line up with its real runtime type (that's what was throwing
-            // "cannot be cast to kotlin.collections.IntIterator" when Kotlin's forEach tried to
-            // iterate it). Grabbing the raw backing field and treating it as a plain List sidesteps
-            // the mismatched getter entirely -- same technique already used below for each
-            // attachment's own "id" field.
+            // message.getAttachments()/.attachments, AND walking it with plain
+            // java.lang.reflect.Method calls (size()/get(i)) instead of a Kotlin for-loop or
+            // .forEach: on this build, Kotlin's compiler treats the collection's element type as
+            // a primitive Int (likely because the stub we compiled against describes a different
+            // generic signature than the real, obfuscated runtime class), so any `for (x in it)`
+            // or `.forEach` over it gets compiled to use kotlin.collections.IntIterator and then
+            // crashes trying to cast the real iterator object to that type. Driving it entirely
+            // through reflection avoids that codegen path -- nothing here is typed as an
+            // Iterable<T> at compile time, so there's nothing for the compiler to mis-specialize.
             val rawAttachments = runCatching { ReflectUtils.getField(message, "attachments") }.getOrNull()
-            (rawAttachments as? List<*>)?.forEach { attachment ->
-                if (attachment == null) return@forEach
-                // MessageAttachment's "id" field has no public getter in the generated stub
-                // (not even getId()), so it's read through reflection, the same way
-                // EditMessagesLocally.java reads/writes private fields on Discord's own model
-                // classes.
-                val id = runCatching { ReflectUtils.getField(attachment, "id") }.getOrNull()
-                if (id != null) {
-                    attachments.put(JSONObject().apply { put("id", id.toString()) })
+            if (rawAttachments != null) {
+                val listClass = rawAttachments.javaClass
+                val size = runCatching { listClass.getMethod("size").invoke(rawAttachments) as? Int }.getOrNull()
+                val getMethod = runCatching { listClass.getMethod("get", Int::class.javaPrimitiveType) }.getOrNull()
+                if (size != null && getMethod != null) {
+                    for (i in 0 until size) {
+                        val attachment = runCatching { getMethod.invoke(rawAttachments, i) }.getOrNull() ?: continue
+                        // MessageAttachment's "id" field has no public getter in the generated
+                        // stub (not even getId()), so it's read through reflection, the same way
+                        // EditMessagesLocally.java reads/writes private fields on Discord's own
+                        // model classes.
+                        val id = runCatching { ReflectUtils.getField(attachment, "id") }.getOrNull()
+                        if (id != null) {
+                            attachments.put(JSONObject().apply { put("id", id.toString()) })
+                        }
+                    }
                 }
             }
         } catch (e: Throwable) {
