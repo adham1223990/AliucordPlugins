@@ -129,7 +129,6 @@ class AddAttachmentToEdit : Plugin() {
     }
 
     private fun patchNativeEditAttachments() {
-        // 1. Intercept keyboard image paste while editing a message
         try {
             val setAttachmentFromPickerMethod = WidgetChatInputAttachments::class.java.getDeclaredMethod(
                 "setAttachmentFromPicker",
@@ -157,7 +156,6 @@ class AddAttachmentToEdit : Plugin() {
                         } catch (_: Throwable) {
                         }
 
-                        // Prevent Discord from adding it to the blocked edit tray and upload it directly
                         cf.result = null
                         val channelId = message.getChannelId()
                         val messageId = message.getId()
@@ -189,7 +187,6 @@ class AddAttachmentToEdit : Plugin() {
             tag.error("Failed to patch setAttachmentFromPicker", e)
         }
 
-        // 2. Enforce the 10-attachment limit when selecting attachments in the FlexInput tray during edit mode
         try {
             patcher.patch(
                 AppFlexInputViewModel::class.java.getDeclaredMethod(
@@ -231,7 +228,6 @@ class AddAttachmentToEdit : Plugin() {
             tag.error("Failed to patch AppFlexInputViewModel.onAttachmentsUpdated", e)
         }
 
-        // 3. Bypass the native "editing_with_attachment_error" block in WidgetChatInput and forward attachments to sendMessage
         try {
             val sendListenerClass = Class.forName(
                 "com.discord.widgets.chat.input.WidgetChatInput\$configureSendListeners\$7"
@@ -283,7 +279,6 @@ class AddAttachmentToEdit : Plugin() {
                         val channelId = message.getChannelId()
                         val messageId = message.getId()
 
-                        // Clear the editing state & input tray immediately via the callback
                         onSendResult?.invoke(true)
                         StoreStream.getChat().setEditingMessage(null)
                         cf.result = null
@@ -316,7 +311,6 @@ class AddAttachmentToEdit : Plugin() {
             tag.error("Failed to patch WidgetChatInput send listener", e)
         }
 
-        // 4. Fallback hook on ChatInputViewModel.sendMessage in case send is triggered from another path
         try {
             patcher.patch(
                 ChatInputViewModel::class.java.getDeclaredMethod(
@@ -423,4 +417,18 @@ class AddAttachmentToEdit : Plugin() {
         }
     }
 
-    private fun pat
+    private fun patchActivityResult() {
+        patcher.patch(
+            Activity::class.java.getDeclaredMethod(
+                "onActivityResult",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Intent::class.java
+            ),
+            Hook { cf ->
+                val requestCode = cf.args[0] as Int
+                if (requestCode != PICK_IMAGE_REQUEST_CODE) return@Hook
+                val resultCode = cf.args[1] as Int
+                val data = cf.args[2] as? Intent
+                val selectedUris = ArrayList<Uri>()
+                if (resultCode == Activ
