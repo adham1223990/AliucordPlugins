@@ -10,12 +10,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
-/**
- * Adds a new attachment to an already-sent message, following the exact same three-step flow
- * Vencord's own AddAttachments plugin uses on desktop (src/plugins/addAttachments/index.tsx),
- * which is the real, working way current Discord clients do this -- not the older single
- * multipart-PATCH approach the REST docs alone would suggest.
- */
 object AttachmentEditUploader {
 
     private fun token(): String = RestAPI.AppHeadersProvider.INSTANCE.authToken
@@ -23,10 +17,11 @@ object AttachmentEditUploader {
 
     fun addAttachment(channelId: Long, messageId: Long, imageUri: Uri) {
         val authToken = token()
-        val (bytes, filename) = readUri(imageUri)
+        val fileData = readUri(imageUri)
+        val bytes = fileData.first
+        val filename = fileData.second
 
-        // Step 1: ask Discord for a place to upload the file. This is a normal Discord API
-        // route, so it goes through newDiscordRNRequest like everything else.
+        // Step 1: Request an upload URL from Discord
         val requestBody = JSONObject().apply {
             put("files", JSONArray().apply {
                 put(JSONObject().apply {
@@ -56,13 +51,7 @@ object AttachmentEditUploader {
         val uploadUrl = uploadInfo.getString("upload_url")
         val uploadFilename = uploadInfo.getString("upload_filename")
 
-        // Step 2: upload the raw file bytes to the URL Discord just handed back. That URL
-        // points at Discord's storage host (Google Cloud Storage), not a Discord API route, so
-        // newDiscordRNRequest (which prefixes Discord's own API base URL and attaches Discord
-        // auth/RN headers) does not apply here -- it would turn this into a request to
-        // "<discord-api-base>/https://storage.googleapis.com/...", which is wrong. This uses
-        // Aliucord's own plain Http.Request against the exact URL Discord provided, nothing
-        // invented or unofficial.
+        // Step 2: PUT the raw file bytes to the Google Cloud Storage URL returned by Discord
         Http.Request(uploadUrl, "PUT").use { request ->
             request.setRequestTimeout(60_000)
             request.executeWithBody(bytes).use { response ->
@@ -72,45 +61,31 @@ object AttachmentEditUploader {
             }
         }
 
-        // Step 3: attach the uploaded file to the message. Existing attachments must be kept
-        // by id, same as the official edit docs describe
-        // (https://docs.discord.com/developers/resources/message#edit-message); this is a
-        // normal Discord API route again, so it goes through newDiscordRNRequest.
+        // Step 3: PATCH the message with existing attachments + the newly uploaded attachment
         val attachments = JSONArray()
         try {
             val message = StoreStream.getMessages().getMessage(channelId, messageId)
-            // Reading the field directly through reflection instead of calling
-            // message.getAttachments()/.attachments, AND walking it with plain
-            // java.lang.reflect.Method calls (size()/get(i)) instead of a Kotlin for-loop or
-            // .forEach: on this build, Kotlin's compiler treats the collection's element type as
-            // a primitive Int (likely because the stub we compiled against describes a different
-            // generic signature than the real, obfuscated runtime class), so any `for (x in it)`
-            // or `.forEach` over it gets compiled to use kotlin.collections.IntIterator and then
-            // crashes trying to cast the real iterator object to that type. Driving it entirely
-            // through reflection avoids that codegen path -- nothing here is typed as an
-            // Iterable<T> at compile time, so there's nothing for the compiler to mis-specialize.
             val rawAttachments = runCatching { ReflectUtils.getField(message, "attachments") }.getOrNull()
             if (rawAttachments != null) {
                 val listClass = rawAttachments.javaClass
                 val size = runCatching { listClass.getMethod("size").invoke(rawAttachments) as? Int }.getOrNull()
                 val getMethod = runCatching { listClass.getMethod("get", Int::class.javaPrimitiveType) }.getOrNull()
                 if (size != null && getMethod != null) {
-                    for (i in 0 until size) {
-                        val attachment = runCatching { getMethod.invoke(rawAttachments, i) }.getOrNull() ?: continue
-                        // MessageAttachment's "id" field has no public getter in the generated
-                        // stub (not even getId()), so it's read through reflection, the same way
-                        // EditMessagesLocally.java reads/writes private fields on Discord's own
-                        // model classes.
-                        val id = runCatching { ReflectUtils.getField(attachment, "id") }.getOrNull()
-                        if (id != null) {
-                            attachments.put(JSONObject().apply { put("id", id.toString()) })
+                    var i = 0
+                    while (i < size) {
+                        val attachment = runCatching { getMethod.invoke(rawAttachments, i) }.getOrNull()
+                        if (attachment != null) {
+                            val id = runCatching { ReflectUtils.getField(attachment, "id") }.getOrNull()
+                            if (id != null) {
+                                attachments.put(JSONObject().apply { put("id", id.toString()) })
+                            }
                         }
+                        i++
                     }
                 }
             }
         } catch (e: Throwable) {
-            // Non-fatal: worst case we lose the "keep existing attachments" list and only the
-            // new one survives, rather than failing the whole request.
+            // Non-fatal: keep going with the new attachment if reading existing ones fails
         }
         attachments.put(
             JSONObject().apply {
@@ -141,11 +116,23 @@ object AttachmentEditUploader {
 
     private fun readUri(uri: Uri): Pair<ByteArray, String> {
         val resolver = Utils.appActivity.contentResolver
-        val extension = resolver.getType(uri)?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "png"
+        val mime = resolver.getType(uri)
+        val slashIndex = mime?.lastIndexOf('/') ?: -1
+        val extension = if (mime != null && slashIndex >= 0 && slashIndex + 1 < mime.length) {
+            mime.substring(slashIndex + 1)
+        } else {
+            "png"
+        }
         val filename = "attachment_${System.currentTimeMillis()}.$extension"
         val bytes = resolver.openInputStream(uri)?.use { input ->
-            ByteArrayOutputStream().also { input.copyTo(it) }.toByteArray()
+            val buffer = ByteArrayOutputStream()
+            val data = ByteArray(8192)
+            var nRead: Int
+            while (input.read(data, 0, data.size).also { nRead = it } != -1) {
+                buffer.write(data, 0, nRead)
+            }
+            buffer.toByteArray()
         } ?: throw IllegalStateException("Could not read the picked image.")
-        return bytes to filename
+        return Pair(bytes, filename)
     }
 }
