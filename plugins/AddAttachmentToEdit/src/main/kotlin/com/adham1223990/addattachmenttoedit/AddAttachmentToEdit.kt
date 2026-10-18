@@ -3,6 +3,8 @@ package com.adham1223990.addattachmenttoedit
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.net.Uri
 import android.view.View
 import android.widget.LinearLayout
@@ -89,6 +91,18 @@ class AddAttachmentToEdit : Plugin() {
                     )
                     row.id = addAttachmentViewId
                     row.text = "Add Attachment"
+                    // Give the row a proper leading icon instead of plain text, matching the
+                    // look of the native rows around it (Reply, Edit, Delete, etc. all have one).
+                    // android.R.drawable.ic_input_add is a standard Android SDK "+" icon, so it's
+                    // guaranteed to exist without depending on any Discord-specific resource id.
+                    row.setCompoundDrawablesWithIntrinsicBounds(
+                        android.R.drawable.ic_input_add, 0, 0, 0
+                    )
+                    val iconPadding = (12 * lay.context.resources.displayMetrics.density).toInt()
+                    row.compoundDrawablePadding = iconPadding
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                        row.compoundDrawableTintList = ColorStateList.valueOf(Color.WHITE)
+                    }
                     row.setOnClickListener {
                         val channelId = message.getChannelId()
                         val messageId = message.getId()
