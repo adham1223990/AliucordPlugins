@@ -79,11 +79,15 @@ class AddAttachmentToEdit : Plugin() {
             Hook { cf ->
                 try {
                     val model = cf.args[0] as WidgetChatListActions.Model
-                    val message = model.message ?: return@Hook
+                    // Explicit getX() calls below (instead of Kotlin's .x shorthand) on purpose:
+                    // these are generated-stub classes from the Discord APK, and several of
+                    // their properties only expose a private backing field to that shorthand --
+                    // the same issue fixed for SettingsPage.layout and MessageAttachment.id.
+                    val message = model.getMessage() ?: return@Hook
                     val actions = cf.thisObject as WidgetChatListActions
 
-                    val myId = StoreStream.getUsers().me.id
-                    val authorId = CoreUser(message.author).id
+                    val myId = StoreStream.getUsers().me.getId()
+                    val authorId = CoreUser(message.getAuthor()).getId()
                     if (authorId != myId) return@Hook
 
                     val scrollView = actions.view as? NestedScrollView ?: return@Hook
@@ -101,7 +105,7 @@ class AddAttachmentToEdit : Plugin() {
                     row.setOnClickListener {
                         launchImagePicker { uri ->
                             if (uri != null) {
-                                pendingAttachments[message.id] = uri
+                                pendingAttachments[message.getId()] = uri
                                 Utils.showToast(
                                     "Attachment staged. Now use this message's Edit action and press Send to apply it.",
                                     false
