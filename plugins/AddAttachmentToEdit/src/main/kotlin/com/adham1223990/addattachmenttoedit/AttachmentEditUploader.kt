@@ -79,7 +79,16 @@ object AttachmentEditUploader {
         val attachments = JSONArray()
         try {
             val message = StoreStream.getMessages().getMessage(channelId, messageId)
-            message?.attachments?.forEach { attachment ->
+            // Reading the field directly through reflection instead of calling
+            // message.getAttachments()/.attachments: on this build the generated getter's
+            // return type doesn't line up with its real runtime type (that's what was throwing
+            // "cannot be cast to kotlin.collections.IntIterator" when Kotlin's forEach tried to
+            // iterate it). Grabbing the raw backing field and treating it as a plain List sidesteps
+            // the mismatched getter entirely -- same technique already used below for each
+            // attachment's own "id" field.
+            val rawAttachments = runCatching { ReflectUtils.getField(message, "attachments") }.getOrNull()
+            (rawAttachments as? List<*>)?.forEach { attachment ->
+                if (attachment == null) return@forEach
                 // MessageAttachment's "id" field has no public getter in the generated stub
                 // (not even getId()), so it's read through reflection, the same way
                 // EditMessagesLocally.java reads/writes private fields on Discord's own model
