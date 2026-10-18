@@ -19,27 +19,6 @@ import com.discord.models.user.CoreUser
 import com.discord.stores.StoreStream
 import com.discord.widgets.chat.list.actions.WidgetChatListActions
 
-/**
- * Lets you attach a NEW image to one of your own messages after it was sent, the same way
- * Vencord's own "AddAttachments" plugin does on desktop (src/plugins/addAttachments). Discord's
- * mobile edit screen only lets you keep or remove EXISTING attachments; there's no "add a new
- * one" option anywhere in the UI.
- *
- * This mirrors Vencord's real, working flow exactly rather than the client's own (text-only)
- * edit path, which cannot carry attachments at all in this build:
- * 1. POST /channels/{channel.id}/attachments -> Discord returns a one-time upload_url per file.
- * 2. PUT the raw file bytes straight to that upload_url (a storage host Discord itself just
- *    handed back, not a Discord API route -- see the comment on uploadBytes() in
- *    AttachmentEditUploader.kt for why Http.Request.newDiscordRNRequest doesn't apply there).
- * 3. PATCH /channels/{channel.id}/messages/{message.id} with the message's existing attachments
- *    plus the new one -- no multipart body and no content field needed, exactly like Vencord's
- *    implementation, since this only ever changes the attachments.
- *
- * Steps 1 and 3 go through Http.Request.newDiscordRNRequest only, as required.
- *
- * Flow for the user: long-press one of your own messages -> tap "Add Attachment" -> pick an
- * image -> it uploads and appears on the message immediately (no need to also hit Edit/Send).
- */
 @Suppress("unused")
 @AliucordPlugin
 class AddAttachmentToEdit : Plugin() {
@@ -57,8 +36,6 @@ class AddAttachmentToEdit : Plugin() {
         patchActivityResult()
     }
 
-    // Inject an "Add Attachment" row into the message long-press menu, right next to the
-    // existing native Edit action, for your own messages only.
     private fun patchMessageActionsMenu() {
         patcher.patch(
             WidgetChatListActions::class.java.getDeclaredMethod(
@@ -68,10 +45,6 @@ class AddAttachmentToEdit : Plugin() {
             Hook { cf ->
                 try {
                     val model = cf.args[0] as WidgetChatListActions.Model
-                    // Explicit getX() calls below (instead of Kotlin's .x shorthand) on purpose:
-                    // these are generated-stub classes from the Discord APK, and several of
-                    // their properties only expose a private backing field to that shorthand --
-                    // the same issue fixed for SettingsPage.layout.
                     val message = model.getMessage() ?: return@Hook
                     val actions = cf.thisObject as WidgetChatListActions
 
@@ -91,10 +64,6 @@ class AddAttachmentToEdit : Plugin() {
                     )
                     row.id = addAttachmentViewId
                     row.text = "Add Attachment"
-                    // Give the row a proper leading icon instead of plain text, matching the
-                    // look of the native rows around it (Reply, Edit, Delete, etc. all have one).
-                    // android.R.drawable.ic_input_add is a standard Android SDK "+" icon, so it's
-                    // guaranteed to exist without depending on any Discord-specific resource id.
                     row.setCompoundDrawablesWithIntrinsicBounds(
                         android.R.drawable.ic_input_add, 0, 0, 0
                     )
@@ -109,7 +78,7 @@ class AddAttachmentToEdit : Plugin() {
                         actions.dismiss()
                         launchImagePicker { uri ->
                             if (uri == null) return@launchImagePicker
-                            Utils.showToast("Uploading attachment…", false)
+                            Utils.showToast("Uploading attachment...", false)
                             Utils.threadPool.execute {
                                 try {
                                     AttachmentEditUploader.addAttachment(channelId, messageId, uri)
@@ -145,9 +114,6 @@ class AddAttachmentToEdit : Plugin() {
         }
     }
 
-    // Catch the picker's result. Utils.appActivity IS the running Activity, so patching
-    // Activity.onActivityResult here only ever reacts to our own request code and never
-    // touches anything else going through that same callback.
     private fun patchActivityResult() {
         patcher.patch(
             Activity::class.java.getDeclaredMethod(
