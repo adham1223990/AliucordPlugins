@@ -4,6 +4,7 @@ import android.net.Uri
 import com.aliucord.Http
 import com.aliucord.Utils
 import com.aliucord.utils.ReflectUtils
+import com.discord.models.message.Message
 import com.discord.stores.StoreStream
 import com.discord.utilities.rest.RestAPI
 import org.json.JSONArray
@@ -12,59 +13,15 @@ import java.io.ByteArrayOutputStream
 
 object AttachmentEditUploader {
 
+    const val MAX_ATTACHMENTS = 10
+
     private fun token(): String = RestAPI.AppHeadersProvider.INSTANCE.authToken
         ?: throw IllegalStateException("Not signed in to Discord.")
 
-    fun addAttachment(channelId: Long, messageId: Long, imageUri: Uri) {
-        val authToken = token()
-        val fileData = readUri(imageUri)
-        val bytes = fileData.first
-        val filename = fileData.second
-
-        // Step 1: Request an upload URL from Discord
-        val requestBody = JSONObject().apply {
-            put("files", JSONArray().apply {
-                put(JSONObject().apply {
-                    put("filename", filename)
-                    put("file_size", bytes.size)
-                    put("id", "0")
-                    put("is_clip", false)
-                })
-            })
-        }
-        val uploadInfo = Http.Request.newDiscordRNRequest(
-            "/channels/$channelId/attachments",
-            "POST"
-        ).use { request ->
-            request.setHeader("Authorization", authToken)
-            request.setHeader("Content-Type", "application/json")
-            request.setRequestTimeout(30_000)
-            request.executeWithBody(requestBody.toString()).use { response ->
-                if (!response.ok()) {
-                    throw IllegalStateException(
-                        "Discord refused the upload slot: HTTP ${response.statusCode} ${response.text()}"
-                    )
-                }
-                JSONObject(response.text()).getJSONArray("attachments").getJSONObject(0)
-            }
-        }
-        val uploadUrl = uploadInfo.getString("upload_url")
-        val uploadFilename = uploadInfo.getString("upload_filename")
-
-        // Step 2: PUT the raw file bytes to the Google Cloud Storage URL returned by Discord
-        Http.Request(uploadUrl, "PUT").use { request ->
-            request.setRequestTimeout(60_000)
-            request.executeWithBody(bytes).use { response ->
-                if (!response.ok()) {
-                    throw IllegalStateException("Upload failed: HTTP ${response.statusCode}")
-                }
-            }
-        }
-
-        // Step 3: PATCH the message with existing attachments + the newly uploaded attachment
-        val attachments = JSONArray()
+    fun getExistingAttachmentIds(message: Message?): List<String> {
+        if (message == null) return emptyList()
+        val ids = ArrayList<String>()
         try {
-            val message = StoreStream.getMessages().getMessage(channelId, messageId)
             val rawAttachments = runCatching { ReflectUtils.getField(message, "attachments") }.getOrNull()
             if (rawAttachments != null) {
                 val listClass = rawAttachments.javaClass
@@ -77,25 +34,129 @@ object AttachmentEditUploader {
                         if (attachment != null) {
                             val id = runCatching { ReflectUtils.getField(attachment, "id") }.getOrNull()
                             if (id != null) {
-                                attachments.put(JSONObject().apply { put("id", id.toString()) })
+                                ids.add(id.toString())
                             }
                         }
                         i++
                     }
                 }
             }
-        } catch (e: Throwable) {
-            // Non-fatal: keep going with the new attachment if reading existing ones fails
+        } catch (_: Throwable) {
         }
-        attachments.put(
-            JSONObject().apply {
-                put("id", "0")
-                put("uploaded_filename", uploadFilename)
-                put("filename", filename)
-            }
-        )
+        return ids
+    }
 
-        val editBody = JSONObject().apply { put("attachments", attachments) }
+    fun getAttachmentCount(channelId: Long, messageId: Long): Int {
+        val message = runCatching { StoreStream.getMessages().getMessage(channelId, messageId) }.getOrNull()
+        return getExistingAttachmentIds(message).size
+    }
+
+    fun addAttachments(
+        channelId: Long,
+        messageId: Long,
+        imageUris: List<Uri>,
+        newContent: String? = null
+    ) {
+        if (imageUris.isEmpty()) return
+
+        val message = runCatching { StoreStream.getMessages().getMessage(channelId, messageId) }.getOrNull()
+        val existingIds = getExistingAttachmentIds(message)
+
+        if (existingIds.size >= MAX_ATTACHMENTS) {
+            throw IllegalStateException("Maximum of $MAX_ATTACHMENTS attachments reached.")
+        }
+        if (existingIds.size + imageUris.size > MAX_ATTACHMENTS) {
+            val remaining = MAX_ATTACHMENTS - existingIds.size
+            throw IllegalStateException(
+                "Cannot add ${imageUris.size} attachments. Only $remaining slot(s) remaining (max $MAX_ATTACHMENTS)."
+            )
+        }
+
+        val authToken = token()
+
+        // Read all selected URIs into memory first
+        val preparedFiles = ArrayList<Pair<ByteArray, String>>(imageUris.size)
+        var idx = 0
+        while (idx < imageUris.size) {
+            preparedFiles.add(readUri(imageUris[idx], idx))
+            idx++
+        }
+
+        // Step 1: Request upload slots from Discord for all files at once
+        val filesJson = JSONArray()
+        var i = 0
+        while (i < preparedFiles.size) {
+            val filePair = preparedFiles[i]
+            filesJson.put(JSONObject().apply {
+                put("filename", filePair.second)
+                put("file_size", filePair.first.size)
+                put("id", i.toString())
+                put("is_clip", false)
+            })
+            i++
+        }
+        val requestBody = JSONObject().apply {
+            put("files", filesJson)
+        }
+
+        val uploadAttachmentsJson = Http.Request.newDiscordRNRequest(
+            "/channels/$channelId/attachments",
+            "POST"
+        ).use { request ->
+            request.setHeader("Authorization", authToken)
+            request.setHeader("Content-Type", "application/json")
+            request.setRequestTimeout(30_000)
+            request.executeWithBody(requestBody.toString()).use { response ->
+                if (!response.ok()) {
+                    throw IllegalStateException(
+                        "Discord refused the upload slot: HTTP ${response.statusCode} ${response.text()}"
+                    )
+                }
+                JSONObject(response.text()).getJSONArray("attachments")
+            }
+        }
+
+        // Step 2: PUT raw bytes for each file to its corresponding upload_url
+        val uploadedEntries = JSONArray()
+        var k = 0
+        while (k < existingIds.size) {
+            uploadedEntries.put(JSONObject().apply {
+                put("id", existingIds[k])
+            })
+            k++
+        }
+
+        var u = 0
+        while (u < preparedFiles.size) {
+            val slotInfo = uploadAttachmentsJson.getJSONObject(u)
+            val uploadUrl = slotInfo.getString("upload_url")
+            val uploadFilename = slotInfo.getString("upload_filename")
+            val filePair = preparedFiles[u]
+
+            Http.Request(uploadUrl, "PUT").use { request ->
+                request.setRequestTimeout(60_000)
+                request.executeWithBody(filePair.first).use { response ->
+                    if (!response.ok()) {
+                        throw IllegalStateException("Upload failed: HTTP ${response.statusCode}")
+                    }
+                }
+            }
+
+            uploadedEntries.put(JSONObject().apply {
+                put("id", u.toString())
+                put("uploaded_filename", uploadFilename)
+                put("filename", filePair.second)
+            })
+            u++
+        }
+
+        // Step 3: PATCH the message with existing + new attachments (and updated content if editing)
+        val editBody = JSONObject().apply {
+            put("attachments", uploadedEntries)
+            if (newContent != null) {
+                put("content", newContent)
+            }
+        }
 
         Http.Request.newDiscordRNRequest(
             "/channels/$channelId/messages/$messageId",
@@ -114,7 +175,7 @@ object AttachmentEditUploader {
         }
     }
 
-    private fun readUri(uri: Uri): Pair<ByteArray, String> {
+    private fun readUri(uri: Uri, index: Int): Pair<ByteArray, String> {
         val resolver = Utils.appActivity.contentResolver
         val mime = resolver.getType(uri)
         val slashIndex = mime?.lastIndexOf('/') ?: -1
@@ -123,7 +184,7 @@ object AttachmentEditUploader {
         } else {
             "png"
         }
-        val filename = "attachment_${System.currentTimeMillis()}.$extension"
+        val filename = "attachment_${System.currentTimeMillis()}_$index.$extension"
         val bytes = resolver.openInputStream(uri)?.use { input ->
             val buffer = ByteArrayOutputStream()
             val data = ByteArray(8192)
