@@ -13,38 +13,30 @@ import com.aliucord.Utils
 import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
-import com.aliucord.patcher.InsteadHook
 import com.discord.models.user.CoreUser
 import com.discord.stores.StoreStream
-import com.discord.widgets.chat.MessageManager
 import com.discord.widgets.chat.list.actions.WidgetChatListActions
-import de.robv.android.xposed.XposedBridge
-import kotlin.jvm.functions.Function2
-import java.lang.reflect.InvocationTargetException
 
 /**
- * Lets you attach a NEW image to a message while editing it.
+ * Lets you attach a NEW image to one of your own messages after it was sent, the same way
+ * Vencord's own "AddAttachments" plugin does on desktop (src/plugins/addAttachments). Discord's
+ * mobile edit screen only lets you keep or remove EXISTING attachments; there's no "add a new
+ * one" option anywhere in the UI.
  *
- * Discord's own edit screen only lets you keep or remove EXISTING attachments; it never lets
- * you add a new one, because the client's own edit code path (MessageManager.editMessage ->
- * StoreMessages.editMessage) only ever sends the text content -- there is no attachment support
- * in that path at all in this build. The official REST API, however, fully supports adding new
- * files on an edit: PATCH /channels/{channel.id}/messages/{message.id} accepts multipart
- * "files[n]" parts plus an "attachments" array, and new files are appended to the message
- * (see https://docs.discord.com/developers/resources/message#edit-message).
+ * This mirrors Vencord's real, working flow exactly rather than the client's own (text-only)
+ * edit path, which cannot carry attachments at all in this build:
+ * 1. POST /channels/{channel.id}/attachments -> Discord returns a one-time upload_url per file.
+ * 2. PUT the raw file bytes straight to that upload_url (a storage host Discord itself just
+ *    handed back, not a Discord API route -- see the comment on uploadBytes() in
+ *    AttachmentEditUploader.kt for why Http.Request.newDiscordRNRequest doesn't apply there).
+ * 3. PATCH /channels/{channel.id}/messages/{message.id} with the message's existing attachments
+ *    plus the new one -- no multipart body and no content field needed, exactly like Vencord's
+ *    implementation, since this only ever changes the attachments.
  *
- * This plugin bypasses the client's limited edit path for messages that have a staged
- * attachment and sends that official request itself, through
- * Http.Request.newDiscordRNRequest only (see AttachmentEditUploader.kt).
+ * Steps 1 and 3 go through Http.Request.newDiscordRNRequest only, as required.
  *
- * Flow:
- * 1. Long-press one of your own messages -> tap the new "Add Attachment To Edit" row.
- * 2. Pick an image from the system picker. It is staged for that message only.
- * 3. Long-press the message again -> Edit (normal Discord action) -> change the text if you
- *    want -> press Send like always.
- * 4. This plugin intercepts that Send for messages with a staged attachment and uploads the
- *    edit + the new image together. Messages without a staged attachment are edited normally,
- *    completely unaffected by this plugin.
+ * Flow for the user: long-press one of your own messages -> tap "Add Attachment" -> pick an
+ * image -> it uploads and appears on the message immediately (no need to also hit Edit/Send).
  */
 @Suppress("unused")
 @AliucordPlugin
@@ -52,10 +44,6 @@ class AddAttachmentToEdit : Plugin() {
 
     companion object {
         private const val PICK_IMAGE_REQUEST_CODE = 822562
-
-        // messageId -> picked image Uri, staged between tapping "Add Attachment To Edit" and
-        // actually pressing Send on the edit box for that same message.
-        val pendingAttachments = HashMap<Long, Uri>()
     }
 
     private val addAttachmentViewId = View.generateViewId()
@@ -65,11 +53,10 @@ class AddAttachmentToEdit : Plugin() {
     override fun start(context: Context) {
         patchMessageActionsMenu()
         patchActivityResult()
-        patchEditMessage()
     }
 
-    // 1. Inject an "Add Attachment To Edit" row into the message long-press menu, right next
-    // to the existing native Edit action, for your own messages only.
+    // Inject an "Add Attachment" row into the message long-press menu, right next to the
+    // existing native Edit action, for your own messages only.
     private fun patchMessageActionsMenu() {
         patcher.patch(
             WidgetChatListActions::class.java.getDeclaredMethod(
@@ -82,7 +69,7 @@ class AddAttachmentToEdit : Plugin() {
                     // Explicit getX() calls below (instead of Kotlin's .x shorthand) on purpose:
                     // these are generated-stub classes from the Discord APK, and several of
                     // their properties only expose a private backing field to that shorthand --
-                    // the same issue fixed for SettingsPage.layout and MessageAttachment.id.
+                    // the same issue fixed for SettingsPage.layout.
                     val message = model.getMessage() ?: return@Hook
                     val actions = cf.thisObject as WidgetChatListActions
 
@@ -101,22 +88,32 @@ class AddAttachmentToEdit : Plugin() {
                         com.lytefast.flexinput.R.i.UiKit_Settings_Item_Icon
                     )
                     row.id = addAttachmentViewId
-                    row.text = "Add Attachment To Edit"
+                    row.text = "Add Attachment"
                     row.setOnClickListener {
+                        val channelId = message.getChannelId()
+                        val messageId = message.getId()
+                        actions.dismiss()
                         launchImagePicker { uri ->
-                            if (uri != null) {
-                                pendingAttachments[message.getId()] = uri
-                                Utils.showToast(
-                                    "Attachment staged. Now use this message's Edit action and press Send to apply it.",
-                                    false
-                                )
+                            if (uri == null) return@launchImagePicker
+                            Utils.showToast("Uploading attachment…", false)
+                            Utils.threadPool.execute {
+                                try {
+                                    AttachmentEditUploader.addAttachment(channelId, messageId, uri)
+                                    Utils.mainThread.post {
+                                        Utils.showToast("Attachment added.", false)
+                                    }
+                                } catch (e: Throwable) {
+                                    tag.error("Failed to add attachment", e)
+                                    Utils.mainThread.post {
+                                        Utils.showToast("Failed to add attachment: ${e.message}", true)
+                                    }
+                                }
                             }
                         }
-                        actions.dismiss()
                     }
                     lay.addView(row, 5)
                 } catch (e: Throwable) {
-                    tag.error("Failed to inject the Add Attachment To Edit button", e)
+                    tag.error("Failed to inject the Add Attachment button", e)
                 }
             }
         )
@@ -134,7 +131,7 @@ class AddAttachmentToEdit : Plugin() {
         }
     }
 
-    // 2. Catch the picker's result. Utils.appActivity IS the running Activity, so patching
+    // Catch the picker's result. Utils.appActivity IS the running Activity, so patching
     // Activity.onActivityResult here only ever reacts to our own request code and never
     // touches anything else going through that same callback.
     private fun patchActivityResult() {
@@ -158,61 +155,8 @@ class AddAttachmentToEdit : Plugin() {
         )
     }
 
-    // 3. The actual fix: when Send is pressed while editing a message that has a staged
-    // attachment, skip Discord's text-only edit path and send our own official PATCH request
-    // with the new file attached. Messages without a staged attachment fall through to the
-    // real, unmodified Discord edit behaviour.
-    private fun patchEditMessage() {
-        patcher.patch(
-            MessageManager::class.java.getDeclaredMethod(
-                "editMessage",
-                Long::class.javaPrimitiveType,
-                Long::class.javaPrimitiveType,
-                String::class.java,
-                Function2::class.java,
-                Integer::class.java
-            ),
-            InsteadHook { cf ->
-                val messageId = cf.args[0] as Long
-                val channelId = cf.args[1] as Long
-                val content = cf.args[2] as String
-                val pendingUri = pendingAttachments[messageId]
-
-                if (pendingUri == null) {
-                    return@InsteadHook try {
-                        XposedBridge.invokeOriginalMethod(cf.method, cf.thisObject, cf.args)
-                    } catch (e: InvocationTargetException) {
-                        tag.error(e)
-                        false
-                    } catch (e: IllegalAccessException) {
-                        tag.error(e)
-                        false
-                    }
-                }
-
-                pendingAttachments.remove(messageId)
-                Utils.showToast("Uploading attachment…", false)
-                Utils.threadPool.execute {
-                    try {
-                        AttachmentEditUploader.sendEditWithAttachment(channelId, messageId, content, pendingUri)
-                        Utils.mainThread.post { Utils.showToast("Message edited with attachment.", false) }
-                    } catch (e: Throwable) {
-                        tag.error("Failed to upload attachment for edit", e)
-                        Utils.mainThread.post {
-                            Utils.showToast("Failed to add attachment: ${e.message}", true)
-                        }
-                    }
-                }
-                // Mirrors the original method's eager-return contract: it validates and
-                // dispatches to a queue without waiting for the network, so we do the same.
-                true
-            }
-        )
-    }
-
     override fun stop(context: Context) {
         patcher.unpatchAll()
-        pendingAttachments.clear()
         pickerCallback = null
     }
 }
