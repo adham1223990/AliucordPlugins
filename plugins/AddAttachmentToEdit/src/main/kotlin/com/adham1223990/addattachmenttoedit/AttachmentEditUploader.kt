@@ -38,7 +38,10 @@ object AttachmentEditUploader {
             try {
                 val message = StoreStream.getMessages().getMessage(channelId, messageId)
                 message?.attachments?.forEach { attachment ->
-                    attachments.put(JSONObject().apply { put("id", attachment.id.toString()) })
+                    // .getId() explicitly: the generated stub for MessageAttachment exposes
+                    // only a private backing field for the Kotlin "id" property shorthand,
+                    // the same visibility quirk fixed earlier for SettingsPage.layout.
+                    attachments.put(JSONObject().apply { put("id", attachment.getId().toString()) })
                 }
             } catch (e: Throwable) {
                 // Non-fatal: worst case we lose the "keep existing attachments" list and only
