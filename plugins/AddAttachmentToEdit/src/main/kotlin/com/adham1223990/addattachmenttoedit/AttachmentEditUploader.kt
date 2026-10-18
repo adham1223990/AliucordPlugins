@@ -28,36 +28,6 @@ object AttachmentEditUploader {
         // Step 1: ask Discord for a place to upload the file. This is a normal Discord API
         // route, so it goes through newDiscordRNRequest like everything else.
         val requestBody = JSONObject().apply {
-package com.adham1223990.addattachmenttoedit
-
-import android.net.Uri
-import com.aliucord.Http
-import com.aliucord.Utils
-import com.aliucord.utils.ReflectUtils
-import com.discord.stores.StoreStream
-import com.discord.utilities.rest.RestAPI
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-
-/**
- * Adds a new attachment to an already-sent message, following the exact same three-step flow
- * Vencord's own AddAttachments plugin uses on desktop (src/plugins/addAttachments/index.tsx),
- * which is the real, working way current Discord clients do this -- not the older single
- * multipart-PATCH approach the REST docs alone would suggest.
- */
-object AttachmentEditUploader {
-
-    private fun token(): String = RestAPI.AppHeadersProvider.INSTANCE.authToken
-        ?: throw IllegalStateException("Not signed in to Discord.")
-
-    fun addAttachment(channelId: Long, messageId: Long, imageUri: Uri) {
-        val authToken = token()
-        val (bytes, filename) = readUri(imageUri)
-
-        // Step 1: ask Discord for a place to upload the file. This is a normal Discord API
-        // route, so it goes through newDiscordRNRequest like everything else.
-        val requestBody = JSONObject().apply {
             put("files", JSONArray().apply {
                 put(JSONObject().apply {
                     put("filename", filename)
