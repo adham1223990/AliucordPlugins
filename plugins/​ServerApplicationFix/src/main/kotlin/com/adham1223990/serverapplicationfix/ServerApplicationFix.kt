@@ -1,5 +1,6 @@
 package com.adham1223990.serverapplicationfix
 
+import android.app.Activity
 import android.content.Context
 import android.content.res.ColorStateList
 import android.view.LayoutInflater
@@ -14,6 +15,7 @@ import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.InsteadHook
+import com.aliucord.patcher.PreHook
 import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
 import com.discord.widgets.settings.WidgetSettings
@@ -68,6 +70,10 @@ class ServerApplicationFix : Plugin() {
         // 3. Replace the native "Complete" submit, which fails with
         // "Failed to update your settings. Please try again." (see patchNativeSubmit)
         patchNativeSubmit()
+
+        // 4. When the native screen can't load the form it shows "Oops! Looks like that didn't
+        // work" and closes; open this plugin's own page (real status / real error) instead.
+        patchInvalidVerificationState()
     }
 
     private fun insertRow(settingsWidget: WidgetSettings) {
@@ -339,6 +345,43 @@ class ServerApplicationFix : Plugin() {
             }
         } catch (t: Throwable) {
             Utils.showToast("Application submitted.", false)
+        }
+    }
+
+    // When the native member-verification screen ends up in its "Invalid" state (its own form load
+    // failed, or the application already exists) it just toasts a generic "Oops!" and closes
+    // itself. Replace that with this plugin's page, which shows the real application status or
+    // the real error from Discord.
+    private fun patchInvalidVerificationState() {
+        try {
+            val widgetClass = Class.forName(
+                "com.discord.widgets.servers.member_verification.WidgetMemberVerification"
+            )
+            val stateClass = Class.forName(
+                "com.discord.widgets.servers.member_verification.WidgetMemberVerificationViewModel\$ViewState"
+            )
+            patcher.patch(
+                widgetClass.getDeclaredMethod("configureUI", stateClass),
+                PreHook { cf ->
+                    val state = cf.args[0] ?: return@PreHook
+                    if (!state.javaClass.name.endsWith("ViewState\$Invalid")) return@PreHook
+
+                    val widget = cf.thisObject ?: return@PreHook
+                    val vm = callNoArg(widget, "getViewModel") ?: return@PreHook
+                    val guildId = (findFieldValue(vm, "guildId") as? Long) ?: return@PreHook
+
+                    // Skip the original (generic toast + finish) and show our page instead.
+                    cf.result = null
+                    val activity = callNoArg(widget, "requireActivity") as? Activity
+                    val ctx = activity ?: Utils.appActivity
+                    val guildName = StoreStream.getGuilds().guilds[guildId]?.name
+                    val page = ApplicationPage(settings, guildId, guildName)
+                    ApplicationsSettingsPage.openPage?.invoke(ctx, page)
+                        ?: Utils.openPageWithProxy(ctx, page)
+                    activity?.finish()
+                }
+            )
+        } catch (_: Throwable) {
         }
     }
 
