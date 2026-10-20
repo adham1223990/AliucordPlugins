@@ -49,14 +49,12 @@ class ApplicationPage(
 
         Utils.threadPool.execute {
             val formResult = ApplicationApi.fetchMemberVerificationForm(guildId, inviteCode)
-            val cooldownSec = ApplicationApi.fetchApplicationCooldown(guildId)
+            // The cooldown route does not exist in the Discord client, so there is nothing to fetch.
+            val cooldownSec = 0L
             val savedRecord = ApplicationStore.getByGuildId(settings, guildId)
 
-            val refreshedStatus = if (savedRecord?.requestId != null) {
-                ApplicationApi.fetchJoinRequestStatus(guildId, savedRecord.requestId)
-            } else {
-                null
-            }
+            // Status now comes from the client's own join-request store (no request id needed).
+            val refreshedStatus = ApplicationApi.fetchJoinRequestStatus(guildId, savedRecord?.requestId)
 
             Utils.mainThread.post {
                 if (!isAdded) return@post
