@@ -274,7 +274,7 @@ class ApplicationsSettingsPage(
             val members = StoreStream.getGuilds().members
             for ((guildId, guild) in guilds) {
                 val myMember = members[guildId]?.get(meId)
-                if (myMember != null && isMemberPending(myMember)) {
+                if (myMember != null && myMember.getPending()) {
                     val existing = ApplicationStore.getByGuildId(settings, guildId)
                     if (existing == null) {
                         ApplicationStore.upsert(
@@ -291,18 +291,6 @@ class ApplicationsSettingsPage(
             }
         } catch (_: Throwable) {
         }
-    }
-
-    /** The pending flag is exposed under different getter names depending on the Discord build. */
-    private fun isMemberPending(member: Any): Boolean {
-        for (name in listOf("getPending", "isPending")) {
-            try {
-                val result = member.javaClass.getMethod(name).invoke(member)
-                if (result is Boolean) return result
-            } catch (_: Throwable) {
-            }
-        }
-        return false
     }
 
     private fun createSmallButton(
