@@ -13,14 +13,12 @@ import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.fragments.SettingsPage
 import com.aliucord.patcher.Hook
-import com.aliucord.patcher.PreHook
+import com.aliucord.patcher.InsteadHook
 import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
-import com.discord.widgets.guilds.join.GuildJoinHelperKt
 import com.discord.widgets.settings.WidgetSettings
 import java.util.Collections
 import java.util.WeakHashMap
-import kotlin.jvm.functions.Function1
 
 @AliucordPlugin
 class ServerApplicationFix : Plugin() {
@@ -67,145 +65,9 @@ class ServerApplicationFix : Plugin() {
         // 2. Patch Member Verification & Join Request widgets to fix "View Application Status"
         hookMemberVerificationWidgets()
 
-        // 3. The actual, reliable join trigger: every join path (invite link, "Join" button in
-        // a message, etc.) funnels through GuildJoinHelperKt.joinGuild(...). We wrap its onNext
-        // callback (fired once the join truly succeeds) so a pending application is detected
-        // and opened immediately, instead of depending on scraping a visible button somewhere.
-        hookGuildJoin()
-    }
-
-    private fun hookGuildJoin() {
-        val joinGuildMethod = GuildJoinHelperKt::class.java.declaredMethods
-            .firstOrNull { it.name == "joinGuild" }
-
-        if (joinGuildMethod == null) {
-            logger.error("ServerApplicationFix: joinGuild not found on GuildJoinHelperKt", null)
-            return
-        }
-
-        // The onNext(Guild) callback is always the last parameter — found by position instead
-        // of an exact parameter-type list, since the plugin build stub and the real APK don't
-        // always agree on every parameter type and a mismatched getDeclaredMethod(...) call
-        // throws silently, which is exactly how this hook went missing last time.
-        val onNextIndex = joinGuildMethod.parameterCount - 1
-        // Confirmed from the real joinGuild(...) signature (GuildJoinHelperKt.java): the
-        // errorHandler (Function1<Error, Unit>) sits two parameters before onNext, with
-        // captchaPayload in between: (..., errorHandler, captchaPayload, onNext).
-        val errorHandlerIndex = onNextIndex - 2
-
-        try {
-            patcher.patch(joinGuildMethod, PreHook { param ->
-                try {
-                    @Suppress("UNCHECKED_CAST")
-                    val originalOnNext = param.args[onNextIndex] as? Function1<Any?, Unit>
-                    val wrappedOnNext: (Any?) -> Unit = { guildAny ->
-                        try {
-                            originalOnNext?.invoke(guildAny)
-                        } finally {
-                            try {
-                                if (guildAny != null) {
-                                    val gid = guildAny.javaClass.getMethod("getId").invoke(guildAny) as? Long
-                                    if (gid != null && gid > 0L) onGuildJoined(gid)
-                                }
-                            } catch (e: Throwable) {
-                                logger.error("ServerApplicationFix: failed to read joined guild id", e)
-                            }
-                        }
-                    }
-                    param.args[onNextIndex] = wrappedOnNext
-                } catch (e: Throwable) {
-                    logger.error("ServerApplicationFix: failed to wrap joinGuild onNext", e)
-                }
-
-                // Captcha / failure visibility ONLY — the original errorHandler always runs
-                // first and completely untouched, so Discord's own native captcha challenge
-                // (and its internal retry of this same join, reusing this same handler chain)
-                // keeps working exactly as before. We just make the failure visible in our own
-                // log, since previously a captcha-gated "Oops" left nothing logged anywhere.
-                try {
-                    if (errorHandlerIndex in param.args.indices) {
-                        @Suppress("UNCHECKED_CAST")
-                        val originalErrorHandler = param.args[errorHandlerIndex] as? Function1<Any?, Unit>
-                        if (originalErrorHandler != null) {
-                            val wrappedErrorHandler: (Any?) -> Unit = { errorAny ->
-                                runCatching { logJoinError(errorAny) }
-                                    .onFailure { logger.error("ServerApplicationFix: failed to log join error", it) }
-                                originalErrorHandler.invoke(errorAny)
-                            }
-                            param.args[errorHandlerIndex] = wrappedErrorHandler
-                        }
-                    }
-                } catch (e: Throwable) {
-                    logger.error("ServerApplicationFix: failed to wrap joinGuild errorHandler", e)
-                }
-            })
-            logger.info(
-                "ServerApplicationFix: patched GuildJoinHelperKt.joinGuild " +
-                    "(onNext at $onNextIndex, errorHandler at $errorHandlerIndex)"
-            )
-        } catch (e: Throwable) {
-            logger.error("ServerApplicationFix: failed to patch joinGuild", e)
-        }
-    }
-
-    // Best-effort, read-only inspection of the join failure so a captcha requirement (or any
-    // other rejection) shows up in our own plugin log with the server's actual error text,
-    // instead of just a silent "Oops" toast with nothing to go on.
-    private fun logJoinError(errorAny: Any?) {
-        if (errorAny == null) {
-            logger.error("ServerApplicationFix: join failed with a null error", null)
-            return
-        }
-        val text = runCatching {
-            // Most of Discord's internal Error wrappers expose getMessage()/getResponse(); try
-            // the common ones first and fall back to toString() if none are present.
-            val cls = errorAny.javaClass
-            val viaMessage = runCatching { cls.getMethod("getMessage").invoke(errorAny)?.toString() }.getOrNull()
-            val viaResponse = runCatching { cls.getMethod("getResponse").invoke(errorAny)?.toString() }.getOrNull()
-            listOfNotNull(viaMessage, viaResponse).joinToString(" | ").ifBlank { errorAny.toString() }
-        }.getOrDefault(errorAny.toString())
-
-        if (text.contains("captcha", ignoreCase = true)) {
-            logger.error(
-                "ServerApplicationFix: join requires a captcha. Discord's own captcha " +
-                    "challenge should appear now — solve it and the join will retry " +
-                    "automatically. Details: $text",
-                null
-            )
-        } else {
-            logger.error("ServerApplicationFix: join failed: $text", null)
-        }
-    }
-
-    // Runs off the main thread (network call), checks whether the just-joined guild actually
-    // has an active member-verification form, records it, then opens ApplicationPage.
-    private fun onGuildJoined(guildId: Long) {
-        Utils.threadPool.execute {
-            val form = ApplicationApi.fetchMemberVerificationForm(guildId).getOrNull() ?: return@execute
-            if (form.fields.isEmpty()) return@execute
-
-            val guildName = form.guildName
-                ?: StoreStream.getGuilds().guilds[guildId]?.name
-                ?: "Server $guildId"
-
-            ApplicationStore.upsert(
-                settings,
-                SavedApplicationRecord(
-                    guildId = guildId,
-                    guildName = guildName,
-                    guildIcon = form.guildIcon,
-                    requestId = form.requestId,
-                    status = form.joinRequestStatus ?: "STARTED",
-                    formDescription = form.description
-                )
-            )
-
-            Utils.mainThread.post {
-                val page = ApplicationPage(settings, guildId, guildName)
-                ApplicationsSettingsPage.openPage?.invoke(Utils.appActivity, page)
-                    ?: Utils.openPageWithProxy(Utils.appActivity, page)
-            }
-        }
+        // 3. Replace the native "Complete" submit, which fails with
+        // "Failed to update your settings. Please try again." (see patchNativeSubmit)
+        patchNativeSubmit()
     }
 
     private fun insertRow(settingsWidget: WidgetSettings) {
@@ -299,6 +161,184 @@ class ServerApplicationFix : Plugin() {
                 }
             } catch (_: Throwable) {
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Native member-verification "Complete" button fix
+    // ---------------------------------------------------------------------------------------
+
+    @Volatile
+    private var nativeSubmitting = false
+
+    /**
+     * Discord's own WidgetMemberVerificationViewModel.applyToJoinGuild() sends the form with only
+     * the handful of fields its old model knows (field_type, label, required, values, choices,
+     * response) and then has to parse the server's answer with a strict parser that throws when
+     * "values"/"choices" are missing. Any failure in either step ends in the generic, useless
+     * "Failed to update your settings" toast, with no way to see what the server said.
+     *
+     * This replaces that call: it re-reads the current form from the server (every field exactly
+     * as the server sent it), fills in what the user answered on the native screen, submits it
+     * through ApplicationApi (Http.Request.newDiscordRNRequest only), and then tells the native
+     * screen the same thing it would have been told on success, so its normal "pending" /
+     * "welcome" dialogs and closing behaviour still happen. On failure the real Discord error
+     * message is shown instead of the generic one.
+     */
+    private fun patchNativeSubmit() {
+        try {
+            val vmClass = Class.forName(
+                "com.discord.widgets.servers.member_verification.WidgetMemberVerificationViewModel"
+            )
+            patcher.patch(
+                vmClass.getDeclaredMethod("applyToJoinGuild"),
+                InsteadHook { cf ->
+                    handleNativeSubmit(cf.thisObject)
+                    null
+                }
+            )
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun findFieldValue(target: Any, name: String): Any? {
+        var c: Class<*>? = target.javaClass
+        while (c != null) {
+            try {
+                val f = c.getDeclaredField(name)
+                f.isAccessible = true
+                return f.get(target)
+            } catch (_: NoSuchFieldException) {
+                c = c.superclass
+            }
+        }
+        return null
+    }
+
+    private fun callNoArg(target: Any, name: String): Any? {
+        var c: Class<*>? = target.javaClass
+        while (c != null) {
+            try {
+                val m = c.getDeclaredMethod(name)
+                m.isAccessible = true
+                return m.invoke(target)
+            } catch (_: NoSuchMethodException) {
+                c = c.superclass
+            }
+        }
+        return null
+    }
+
+    private fun handleNativeSubmit(vm: Any) {
+        if (nativeSubmitting) return
+        val guildId = (findFieldValue(vm, "guildId") as? Long) ?: return
+        val viewState = callNoArg(vm, "getViewState")
+        val termsApproved = (viewState?.let { callNoArg(it, "isTermsApproved") } as? Boolean) ?: false
+        val guildObj = viewState?.let { callNoArg(it, "getGuild") }
+        val guildName = guildObj?.let { callNoArg(it, "getName") } as? String
+        val userInput = HashMap<Int, Any?>()
+        (findFieldValue(vm, "formUserInputDataMap") as? Map<*, *>)?.forEach { (k, v) ->
+            if (k is Int) userInput[k] = v
+        }
+
+        nativeSubmitting = true
+        Utils.showToast("Submitting application...", false)
+        Utils.threadPool.execute {
+            try {
+                val form = ApplicationApi.fetchMemberVerificationForm(guildId).getOrElse { err ->
+                    Utils.mainThread.post {
+                        Utils.showToast("Could not load the application form: ${err.message}", true)
+                    }
+                    return@execute
+                }
+
+                val answers = form.fields.mapIndexed { index, field ->
+                    val response: Any? = if (field.fieldType.equals("TERMS", ignoreCase = true)) {
+                        termsApproved
+                    } else {
+                        userInput[index]
+                    }
+                    field to response
+                }
+
+                val res = ApplicationApi.submitGuildApplication(guildId, form.version, answers)
+                Utils.mainThread.post {
+                    if (res.ok) {
+                        val status = res.applicationStatus ?: "PENDING"
+                        ApplicationStore.upsert(
+                            settings,
+                            SavedApplicationRecord(
+                                guildId = guildId,
+                                guildName = guildName ?: form.guildName ?: "Server $guildId",
+                                guildIcon = form.guildIcon,
+                                requestId = res.requestId,
+                                status = status,
+                                rejectionReason = res.rejectionReason,
+                                submittedAt = res.submittedAt,
+                                formDescription = form.description
+                            )
+                        )
+                        emitNativeSuccess(vm, guildId, guildName, status, res.submittedAt)
+                    } else {
+                        Utils.showToast(
+                            "Application failed: ${res.errorMessage ?: "HTTP ${res.statusCode}"}",
+                            true
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                Utils.mainThread.post {
+                    Utils.showToast("Application failed: ${t.message}", true)
+                }
+            } finally {
+                nativeSubmitting = false
+            }
+        }
+    }
+
+    // Tell the native screen the submit worked, the same way its own success path does
+    // (it closes itself and shows the "pending" or "welcome" dialog).
+    private fun emitNativeSuccess(vm: Any, guildId: Long, guildName: String?, status: String, lastSeen: String?) {
+        try {
+            val loader = vm.javaClass.classLoader
+            val statusClass = Class.forName("com.discord.api.guildjoinrequest.ApplicationStatus", true, loader)
+            val constants = statusClass.enumConstants
+            val wanted = if (status.equals("APPROVED", true)) "APPROVED" else "PENDING"
+            val statusValue = constants.first { (it as Enum<*>).name == wanted }
+
+            val successClass = Class.forName(
+                "com.discord.widgets.servers.member_verification.WidgetMemberVerificationViewModel\$Event\$Success",
+                true,
+                loader
+            )
+            val ctor = successClass.getDeclaredConstructor(
+                Long::class.javaObjectType,
+                String::class.java,
+                statusClass,
+                String::class.java
+            )
+            ctor.isAccessible = true
+            // Native success handling expects lastSeen == null for an instantly approved request.
+            val event = ctor.newInstance(
+                guildId,
+                guildName,
+                statusValue,
+                if (wanted == "APPROVED") null else lastSeen
+            )
+
+            val subject = findFieldValue(vm, "eventSubject") ?: return
+            // The app itself calls eventSubject.k.onNext(event); fall back to onNext on the subject.
+            val inner = runCatching { findFieldValue(subject, "k") }.getOrNull()
+            val candidates = listOfNotNull(inner, subject)
+            for (target in candidates) {
+                val m = target.javaClass.methods.firstOrNull { it.name == "onNext" && it.parameterTypes.size == 1 }
+                if (m != null) {
+                    m.invoke(target, event)
+                    return
+                }
+            }
+        } catch (t: Throwable) {
+            Utils.showToast("Application submitted.", false)
         }
     }
 
