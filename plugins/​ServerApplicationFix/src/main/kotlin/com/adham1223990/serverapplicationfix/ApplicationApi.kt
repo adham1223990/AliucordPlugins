@@ -47,6 +47,42 @@ data class JoinRequestResult(
 
 object ApplicationApi {
 
+    fun cleanInviteCode(raw: String?): String? {
+        if (raw.isNullOrBlankSafe()) return null
+        var cleaned = raw.trim()
+        val slashIdx = cleaned.lastIndexOf('/')
+        if (slashIdx >= 0 && slashIdx < cleaned.length - 1) {
+            cleaned = cleaned.substring(slashIdx + 1)
+        }
+        val qIdx = cleaned.indexOf('?')
+        if (qIdx >= 0) {
+            cleaned = cleaned.substring(0, qIdx)
+        }
+        return cleaned.trim().orNullIfBlank()
+    }
+
+    fun resolveInviteGuild(inviteCode: String): Triple<Long, String?, String?>? {
+        val code = cleanInviteCode(inviteCode) ?: return null
+        return try {
+            val res = createSafeRNRequest(
+                "/invites/${URLEncoder.encode(code, "UTF-8")}?with_counts=true&with_expiration=true",
+                "GET",
+                null,
+                "Accept Invite Page"
+            ).execute()
+            if (res.statusCode in 200..299) {
+                val root = JSONObject(readBody(res))
+                val guildObj = root.optJSONObject("guild") ?: return null
+                val id = guildObj.optString("id", "").toLongOrNull() ?: return null
+                val name = guildObj.optString("name", "").orNullIfBlank()
+                val icon = guildObj.optString("icon", "").orNullIfBlank()
+                Triple(id, name, icon)
+            } else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun buildContextProperties(guildId: Long, location: String = "Accept Invite Page"): String {
         return try {
             val json = JSONObject().apply {
@@ -65,15 +101,9 @@ object ApplicationApi {
         guildId: Long? = null,
         contextLocation: String = "Guild Member Verification"
     ): Http.Request {
-        // Http.Request.newDiscordRNRequest ALREADY prepends "https://discord.com/api/v9" to the
-        // route (see Aliucord's Http.getDiscordRoute), so the route must be relative to that
-        // base, e.g. "/guilds/123/requests/@me". The old code added "/api/v9" on top of it, which
-        // produced ".../api/v9/api/v9/guilds/..." and made every call return 404.
-        // Any leftover "/api/v9" prefix is stripped here defensively.
         val route = "/" + path.trim().removePrefix("/").removePrefix("api/v9").removePrefix("/")
         val req = Http.Request.newDiscordRNRequest(route, method)
             .setHeader("Accept", "application/json")
-        // Without a timeout a stalled connection keeps the page loading indefinitely.
         req.setRequestTimeout(20_000)
         if (guildId != null && guildId > 0L) {
             req.setHeader("X-Context-Properties", buildContextProperties(guildId, contextLocation))
@@ -81,32 +111,31 @@ object ApplicationApi {
         return req
     }
 
-    /**
-     * Same endpoint the Discord app itself uses (RestAPIInterface.getGuildMemberVerificationForm):
-     * GET /guilds/{guild.id}/member-verification
-     * An optional invite_code is tried first (the web client sends it); if that is refused the
-     * plain request the mobile app sends is used instead.
-     */
     fun fetchMemberVerificationForm(guildId: Long, inviteCode: String? = null): Result<VerificationFormResponse> {
         return runCatching {
             val plainRoute = "/guilds/$guildId/member-verification"
-            val first = if (!inviteCode.isNullOrBlankSafe()) {
-                runCatching {
+            val cleanedInvite = cleanInviteCode(inviteCode)
+
+            val response = if (cleanedInvite != null) {
+                val encoded = URLEncoder.encode(cleanedInvite, "UTF-8")
+                val withInvite = runCatching {
                     createSafeRNRequest(
-                        "$plainRoute?invite_code=" + URLEncoder.encode(inviteCode.trim(), "UTF-8"),
+                        "$plainRoute?with_guild=true&invite_code=$encoded",
                         "GET",
                         guildId,
                         "Accept Invite Page"
                     ).execute()
                 }.getOrNull()
+
+                if (withInvite != null && withInvite.statusCode in 200..299) {
+                    withInvite
+                } else {
+                    createSafeRNRequest("$plainRoute?with_guild=true", "GET", guildId, "Accept Invite Page").execute()
+                }
             } else {
-                null
+                createSafeRNRequest("$plainRoute?with_guild=true", "GET", guildId, "Accept Invite Page").execute()
             }
-            val response = if (first != null && first.statusCode in 200..299) {
-                first
-            } else {
-                createSafeRNRequest(plainRoute, "GET", guildId, "Accept Invite Page").execute()
-            }
+
             val statusCode = response.statusCode
             val bodyText = readBody(response)
             if (statusCode !in 200..299) {
@@ -114,83 +143,80 @@ object ApplicationApi {
             }
 
             val root = JSONObject(bodyText)
-            val version = root.optString("version", "").orNullIfBlank()
-            val description = root.optString("description", "").orNullIfBlank()
-
-            val guildObj = root.optJSONObject("guild")
-            val guildName = guildObj?.optString("name", "")?.orNullIfBlank()
-            val guildIcon = guildObj?.optString("icon", "")?.orNullIfBlank()
-
-            val joinRequestObj = root.optJSONObject("guild_join_request")
-            val joinStatus = joinRequestObj?.optString("application_status", "")?.orNullIfBlank()
-            val requestId = joinRequestObj?.optString("join_request_id", "")?.let { jr ->
-                if (jr.isBlankSafe()) joinRequestObj.optString("id", "").orNullIfBlank() else jr
-            }
-
-            val parsedFields = mutableListOf<VerificationField>()
-            val fieldsArr = root.optJSONArray("form_fields") ?: JSONArray()
-            for (i in 0 until fieldsArr.length()) {
-                val fieldObj = fieldsArr.optJSONObject(i) ?: continue
-                val fieldType = fieldObj.optString("field_type", "TEXT_INPUT").uppercase()
-                val label = fieldObj.optString("label", "Question ${i + 1}")
-                val fieldDesc = fieldObj.optString("description", "").orNullIfBlank()
-                val required = fieldObj.optBoolean("required", true)
-                val placeholder = fieldObj.optString("placeholder", "").orNullIfBlank()
-                val maxLength = fieldObj.optInt("max_length", 300).coerceAtLeast(1)
-
-                val valuesList = mutableListOf<String>()
-                val valuesArr = fieldObj.optJSONArray("values")
-                if (valuesArr != null) {
-                    for (j in 0 until valuesArr.length()) {
-                        val v = valuesArr.optString(j, "")
-                        if (v.isNotEmpty()) valuesList.add(v)
-                    }
-                }
-
-                val choicesList = mutableListOf<String>()
-                val choicesArr = fieldObj.optJSONArray("choices")
-                if (choicesArr != null) {
-                    for (j in 0 until choicesArr.length()) {
-                        val c = choicesArr.optString(j, "")
-                        if (c.isNotEmpty()) choicesList.add(c)
-                    }
-                }
-
-                parsedFields.add(
-                    VerificationField(
-                        fieldType = fieldType,
-                        label = label,
-                        description = fieldDesc,
-                        required = required,
-                        values = valuesList,
-                        choices = choicesList,
-                        placeholder = placeholder,
-                        maxLength = maxLength,
-                        rawObject = JSONObject(fieldObj.toString())
-                    )
-                )
-            }
-
-            VerificationFormResponse(
-                guildId = guildId,
-                guildName = guildName,
-                guildIcon = guildIcon,
-                description = description,
-                version = version,
-                fields = parsedFields,
-                joinRequestStatus = joinStatus,
-                requestId = requestId
-            )
+            parseVerificationFormJson(guildId, root)
         }
     }
 
-    /**
-     * PUT /guilds/{guild.id}/requests/@me  (RestAPIInterface.createGuildJoinRequest)
-     * Submits the form responses; the server answers with the join request
-     * (last_seen, application_status, form_responses, guild_id).
-     * NOTE: the old "/requests/@me/cooldown" call was removed -- that route does not exist in the
-     * Discord client, so it only ever returned an error.
-     */
+    private fun parseVerificationFormJson(guildId: Long, root: JSONObject): VerificationFormResponse {
+        val version = root.optString("version", "").orNullIfBlank()
+        val description = root.optString("description", "").orNullIfBlank()
+
+        val guildObj = root.optJSONObject("guild")
+        val guildName = guildObj?.optString("name", "")?.orNullIfBlank()
+        val guildIcon = guildObj?.optString("icon", "")?.orNullIfBlank()
+
+        val joinRequestObj = root.optJSONObject("guild_join_request")
+        val joinStatus = joinRequestObj?.optString("application_status", "")?.orNullIfBlank()
+        val requestId = joinRequestObj?.optString("join_request_id", "")?.let { jr ->
+            if (jr.isBlankSafe()) joinRequestObj.optString("id", "").orNullIfBlank() else jr
+        }
+
+        val parsedFields = mutableListOf<VerificationField>()
+        val fieldsArr = root.optJSONArray("form_fields") ?: JSONArray()
+        for (i in 0 until fieldsArr.length()) {
+            val fieldObj = fieldsArr.optJSONObject(i) ?: continue
+            val fieldType = fieldObj.optString("field_type", "TEXT_INPUT").uppercase()
+            val label = fieldObj.optString("label", "Question ${i + 1}")
+            val fieldDesc = fieldObj.optString("description", "").orNullIfBlank()
+            val required = fieldObj.optBoolean("required", true)
+            val placeholder = fieldObj.optString("placeholder", "").orNullIfBlank()
+            val maxLength = fieldObj.optInt("max_length", 300).coerceAtLeast(1)
+
+            val valuesList = mutableListOf<String>()
+            val valuesArr = fieldObj.optJSONArray("values")
+            if (valuesArr != null) {
+                for (j in 0 until valuesArr.length()) {
+                    val v = valuesArr.optString(j, "")
+                    if (v.isNotEmpty()) valuesList.add(v)
+                }
+            }
+
+            val choicesList = mutableListOf<String>()
+            val choicesArr = fieldObj.optJSONArray("choices")
+            if (choicesArr != null) {
+                for (j in 0 until choicesArr.length()) {
+                    val c = choicesArr.optString(j, "")
+                    if (c.isNotEmpty()) choicesList.add(c)
+                }
+            }
+
+            parsedFields.add(
+                VerificationField(
+                    fieldType = fieldType,
+                    label = label,
+                    description = fieldDesc,
+                    required = required,
+                    values = valuesList,
+                    choices = choicesList,
+                    placeholder = placeholder,
+                    maxLength = maxLength,
+                    rawObject = JSONObject(fieldObj.toString())
+                )
+            )
+        }
+
+        return VerificationFormResponse(
+            guildId = guildId,
+            guildName = guildName,
+            guildIcon = guildIcon,
+            description = description,
+            version = version,
+            fields = parsedFields,
+            joinRequestStatus = joinStatus,
+            requestId = requestId
+        )
+    }
+
     fun submitGuildApplication(
         guildId: Long,
         version: String?,
@@ -218,7 +244,6 @@ object ApplicationApi {
                         fieldCopy.put("response", userResponse?.toString() ?: true)
                     }
                     else -> {
-                        // TEXT_INPUT, PARAGRAPH, etc.
                         fieldCopy.put("response", userResponse?.toString()?.trim() ?: "")
                     }
                 }
@@ -271,10 +296,6 @@ object ApplicationApi {
         }
     }
 
-    /**
-     * POST /guilds/{guild.id}/requests/@me  (RestAPIInterface.resetGuildJoinRequest)
-     * Resets the current user's guild join request to STARTED so they can re-apply.
-     */
     fun resetGuildApplication(guildId: Long): JoinRequestResult {
         return try {
             val response = createSafeRNRequest(
@@ -312,10 +333,6 @@ object ApplicationApi {
         }
     }
 
-    /**
-     * DELETE /guilds/{guild.id}/requests/@me  (RestAPIInterface.deleteGuildJoinRequest)
-     * Deletes / withdraws the user's pending or started join request.
-     */
     fun withdrawGuildApplication(guildId: Long): JoinRequestResult {
         return try {
             val response = createSafeRNRequest(
@@ -349,24 +366,13 @@ object ApplicationApi {
         }
     }
 
-    /**
-     * Current status of the user's join request for a guild.
-     *
-     * The old "GET /join-requests/{request.id}" route does not exist in the Discord client, so the
-     * status is now read the same way the app itself reads it: from the client's own
-     * StoreGuildJoinRequest, which the gateway keeps in sync (GUILD_JOIN_REQUEST_CREATE/UPDATE/
-     * DELETE) and which is also what the PUT/POST/DELETE "requests/@me" calls feed. No network
-     * request is needed for that. Only when the store has nothing for this guild does it fall
-     * back to the member-verification form request (through newDiscordRNRequest).
-     */
     fun fetchJoinRequestStatus(
         guildId: Long,
         requestId: String? = null,
+        inviteCode: String? = null,
         allowNetwork: Boolean = true
     ): JoinRequestResult {
         try {
-            // Typed as Any? and read through reflection on purpose: GuildJoinRequest's getters are
-            // obfuscated single-letter names, but its fields keep their real names.
             val stored: Any? = StoreStream.getGuildJoinRequests().getGuildJoinRequest(guildId)
             if (stored != null) {
                 fun readField(name: String): String? =
@@ -374,13 +380,15 @@ object ApplicationApi {
                         ?.toString()?.takeIf { it.isNotBlankSafe() && it != "null" }
 
                 val status = readField("applicationStatus")
+                val jrId = readField("joinRequestId") ?: readField("id") ?: requestId
                 if (status != null) {
                     return JoinRequestResult(
                         ok = true,
                         statusCode = 200,
-                        requestId = requestId,
+                        requestId = jrId,
                         applicationStatus = status,
                         rejectionReason = readField("rejectionReason"),
+                        interviewChannelId = readField("interviewChannelId"),
                         submittedAt = readField("lastSeen") ?: readField("createdAt"),
                         actionedAt = readField("actionedAt")
                     )
@@ -389,18 +397,17 @@ object ApplicationApi {
         } catch (_: Throwable) {
         }
 
-        // Nothing in the store: callers that already loaded the form don't need a second request.
         if (!allowNetwork) {
             return JoinRequestResult(ok = false, statusCode = 0, errorMessage = "No stored status")
         }
-        val formRes = fetchMemberVerificationForm(guildId)
+        val formRes = fetchMemberVerificationForm(guildId, inviteCode)
         val form = formRes.getOrNull()
         return if (form != null) {
             JoinRequestResult(
                 ok = true,
                 statusCode = 200,
                 requestId = form.requestId ?: requestId,
-                applicationStatus = form.joinRequestStatus
+                applicationStatus = form.joinRequestStatus ?: "STARTED"
             )
         } else {
             JoinRequestResult(
@@ -411,18 +418,12 @@ object ApplicationApi {
         }
     }
 
-    /**
-     * Reads a response body safely. Aliucord's Http.Response.text() calls assertOk() first and so
-     * THROWS for any non-2xx status; the real error body is only reachable through the
-     * HttpException message. Without this every 4xx/5xx came back as an empty "HTTP Error 400".
-     */
     private fun readBody(response: Http.Response): String {
         if (response.ok()) return runCatching { response.text() }.getOrDefault("")
         return runCatching { response.assertOk() }.exceptionOrNull()?.message ?: ""
     }
 
     private fun parseDiscordError(statusCode: Int, rawBody: String): String {
-        // The body may be wrapped in extra text (HttpException message), so take the JSON part.
         val start = rawBody.indexOf('{')
         val end = rawBody.lastIndexOf('}')
         if (start >= 0 && end > start) {

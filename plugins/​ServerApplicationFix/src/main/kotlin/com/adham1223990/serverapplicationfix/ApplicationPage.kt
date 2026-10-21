@@ -12,7 +12,6 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
-import android.widget.ScrollView
 import android.widget.TextView
 import com.aliucord.Utils
 import com.aliucord.api.SettingsAPI
@@ -22,7 +21,7 @@ class ApplicationPage(
     private val settings: SettingsAPI?,
     private val guildId: Long,
     private val initialGuildName: String? = null,
-    private val inviteCode: String? = null
+    private var inviteCode: String? = null
 ) : SettingsPage() {
 
     private var loadedForm: VerificationFormResponse? = null
@@ -44,13 +43,9 @@ class ApplicationPage(
         val pad = FormStyle.dp(ctx, 16)
         container.setPadding(pad, pad, pad, pad)
 
-        // Build marker + toast: proves this exact version of the page is the one that is running.
-        Utils.showToast("Application page v5 opened (server $guildId)", false)
         val statusTitle = createTextView(ctx, "Loading server application status...", 16f, true, textColor)
         container.addView(statusTitle)
 
-        // Diagnostics: show which step is running, and say so if it takes too long, so the page can
-        // never sit on a silent "Loading..." again.
         val loadDone = java.util.concurrent.atomic.AtomicBoolean(false)
         val loadStage = java.util.concurrent.atomic.AtomicReference("starting")
         fun setStage(stage: String) {
@@ -69,28 +64,31 @@ class ApplicationPage(
         }, 30_000L)
 
         Utils.threadPool.execute {
-            // Everything on this thread is guarded: an uncaught exception here used to leave the
-            // page on "Loading..." forever. Any failure now shows up as a normal error card.
             var formResultVar: Result<VerificationFormResponse> =
                 Result.failure(IllegalStateException("Could not load the application form"))
             var savedRecordVar: SavedApplicationRecord? = null
             var refreshedStatusVar: JoinRequestResult? = null
             try {
-                setStage("requesting the form from Discord")
-                formResultVar = ApplicationApi.fetchMemberVerificationForm(guildId, inviteCode)
                 setStage("reading saved status")
                 savedRecordVar = ApplicationStore.getByGuildId(settings, guildId)
-                // Status comes from the client's own join-request store (no extra request).
+
+                val effectiveInvite = ApplicationApi.cleanInviteCode(inviteCode)
+                    ?: ApplicationApi.cleanInviteCode(savedRecordVar?.inviteCode)
+                inviteCode = effectiveInvite
+
+                setStage("requesting the form from Discord")
+                formResultVar = ApplicationApi.fetchMemberVerificationForm(guildId, effectiveInvite)
+
                 refreshedStatusVar = ApplicationApi.fetchJoinRequestStatus(
                     guildId,
                     savedRecordVar?.requestId,
+                    effectiveInvite,
                     allowNetwork = false
                 )
             } catch (t: Throwable) {
                 formResultVar = Result.failure(t)
             }
             val formResult = formResultVar
-            // The cooldown route does not exist in the Discord client, so there is nothing to fetch.
             val cooldownSec = 0L
             val savedRecord = savedRecordVar
             val refreshedStatus = refreshedStatusVar
@@ -98,131 +96,162 @@ class ApplicationPage(
             Utils.mainThread.post {
                 loadDone.set(true)
                 try {
-                container.removeAllViews()
+                    container.removeAllViews()
 
-                val form = formResult.getOrNull()
-                loadedForm = form
+                    val form = formResult.getOrNull()
+                    loadedForm = form
 
-                val effectiveName = form?.guildName ?: savedRecord?.guildName ?: initialGuildName ?: "Server $guildId"
-                val effectiveStatus = refreshedStatus?.applicationStatus
-                    ?: form?.joinRequestStatus
-                    ?: savedRecord?.status
-                    ?: "STARTED"
-                val effectiveRequestId = refreshedStatus?.requestId
-                    ?: form?.requestId
-                    ?: savedRecord?.requestId
-                val effectiveReason = refreshedStatus?.rejectionReason ?: savedRecord?.rejectionReason
-                val effectiveInterviewId = refreshedStatus?.interviewChannelId ?: savedRecord?.interviewChannelId
+                    val effectiveName = form?.guildName ?: savedRecord?.guildName ?: initialGuildName ?: "Server $guildId"
+                    val effectiveStatus = refreshedStatus?.applicationStatus
+                        ?: form?.joinRequestStatus
+                        ?: savedRecord?.status
+                        ?: "STARTED"
+                    val effectiveRequestId = refreshedStatus?.requestId
+                        ?: form?.requestId
+                        ?: savedRecord?.requestId
+                    val effectiveReason = refreshedStatus?.rejectionReason ?: savedRecord?.rejectionReason
+                    val effectiveInterviewId = refreshedStatus?.interviewChannelId ?: savedRecord?.interviewChannelId
 
-                setActionBarTitle(effectiveName)
-                setActionBarSubtitle("Status: $effectiveStatus")
+                    setActionBarTitle(effectiveName)
+                    setActionBarSubtitle("Status: $effectiveStatus")
 
-                if (form != null) {
                     ApplicationStore.upsert(
                         settings,
                         SavedApplicationRecord(
                             guildId = guildId,
                             guildName = effectiveName,
-                            guildIcon = form.guildIcon ?: savedRecord?.guildIcon,
+                            guildIcon = form?.guildIcon ?: savedRecord?.guildIcon,
                             requestId = effectiveRequestId,
                             status = effectiveStatus,
                             rejectionReason = effectiveReason,
                             interviewChannelId = effectiveInterviewId,
                             inviteCode = inviteCode ?: savedRecord?.inviteCode,
-                            formDescription = form.description ?: savedRecord?.formDescription
+                            formDescription = form?.description ?: savedRecord?.formDescription
                         )
                     )
-                }
 
-                // Header Status Card
-                container.addView(
-                    buildStatusHeaderCard(
-                        ctx = ctx,
-                        guildName = effectiveName,
-                        status = effectiveStatus,
-                        description = form?.description ?: savedRecord?.formDescription,
-                        rejectionReason = effectiveReason,
-                        interviewChannelId = effectiveInterviewId,
-                        cooldownSeconds = cooldownSec,
-                        textColor = textColor
-                    )
-                )
-
-                if (form == null) {
-                    val errorCard = LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        background = FormStyle.roundedBg(ctx, FormStyle.CARD_BG_COLOR, 10, FormStyle.STROKE_COLOR, 1)
-                        setPadding(pad, pad, pad, pad)
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply { topMargin = FormStyle.dp(ctx, 12) }
-                    }
-                    val errMsg = formResult.exceptionOrNull()?.message
-                        ?: "Could not load verification form for this server."
-                    errorCard.addView(
-                        createTextView(
-                            ctx,
-                            "Unable to load form fields:\n$errMsg",
-                            14f,
-                            false,
-                            textColor
+                    container.addView(
+                        buildStatusHeaderCard(
+                            ctx = ctx,
+                            guildName = effectiveName,
+                            status = effectiveStatus,
+                            description = form?.description ?: savedRecord?.formDescription,
+                            rejectionReason = effectiveReason,
+                            interviewChannelId = effectiveInterviewId,
+                            cooldownSeconds = cooldownSec,
+                            textColor = textColor
                         )
                     )
-                    val retryBtn = createActionButton(ctx, "Retry Loading Form", FormStyle.BLURPLE_COLOR, textColor) {
-                        onViewBound(view)
+
+                    if (form == null) {
+                        val errorCard = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            background = FormStyle.roundedBg(ctx, FormStyle.CARD_BG_COLOR, 10, FormStyle.STROKE_COLOR, 1)
+                            setPadding(pad, pad, pad, pad)
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply { topMargin = FormStyle.dp(ctx, 12) }
+                        }
+                        val errMsg = formResult.exceptionOrNull()?.message
+                            ?: "Could not load verification form for this server."
+                        val isUnknownGuild = errMsg.contains("10004") || errMsg.contains("Unknown Guild", ignoreCase = true)
+
+                        val helperNote = if (isUnknownGuild) {
+                            "\n\nNote: Because you are not a member of this server yet, Discord requires the server's Invite Code (or invite link) to load the application questions."
+                        } else ""
+
+                        errorCard.addView(
+                            createTextView(
+                                ctx,
+                                "Unable to load form fields:\n$errMsg$helperNote",
+                                14f,
+                                false,
+                                textColor
+                            )
+                        )
+
+                        val inviteInput = EditText(ctx).apply {
+                            setText(inviteCode ?: "")
+                            hint = "Enter Invite Code or Link (e.g. discord.gg/abc)"
+                            setTextColor(textColor)
+                            setHintTextColor(FormStyle.withAlpha(textColor, 150))
+                            textSize = 14f
+                            background = FormStyle.roundedBg(ctx, FormStyle.INPUT_BG_COLOR, 8, FormStyle.STROKE_COLOR, 1)
+                            val iPad = FormStyle.dp(ctx, 10)
+                            setPadding(iPad, iPad, iPad, iPad)
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply { topMargin = FormStyle.dp(ctx, 10) }
+                        }
+                        errorCard.addView(inviteInput)
+
+                        val retryBtn = createActionButton(ctx, "Load Form with Invite Code / Retry", FormStyle.BLURPLE_COLOR, textColor) {
+                            val entered = ApplicationApi.cleanInviteCode(inviteInput.text?.toString())
+                            if (entered != null) {
+                                inviteCode = entered
+                            }
+                            onViewBound(view)
+                        }
+                        errorCard.addView(retryBtn)
+                        container.addView(errorCard)
+
+                        container.addView(
+                            buildStatusOnlyActionsSection(
+                                ctx = ctx,
+                                view = view,
+                                effectiveName = effectiveName,
+                                textColor = textColor
+                            )
+                        )
+
+                        FormStyle.applyTextColorRecursively(container, settings)
+                        return@post
                     }
-                    errorCard.addView(retryBtn)
-                    container.addView(errorCard)
+
+                    fieldValueReaders.clear()
+                    fieldValidators.clear()
+
+                    if (form.fields.isEmpty()) {
+                        val emptyCard = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            background = FormStyle.roundedBg(ctx, FormStyle.CARD_BG_COLOR, 10, FormStyle.STROKE_COLOR, 1)
+                            setPadding(pad, pad, pad, pad)
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply { topMargin = FormStyle.dp(ctx, 12) }
+                        }
+                        emptyCard.addView(
+                            createTextView(
+                                ctx,
+                                "This server has no custom questions, or you can submit your application directly.",
+                                14f,
+                                false,
+                                textColor
+                            )
+                        )
+                        container.addView(emptyCard)
+                    } else {
+                        form.fields.forEachIndexed { index, field ->
+                            container.addView(buildFieldCard(ctx, index, field, textColor))
+                        }
+                    }
+
+                    container.addView(
+                        buildActionsSection(
+                            ctx = ctx,
+                            view = view,
+                            form = form,
+                            effectiveName = effectiveName,
+                            effectiveStatus = effectiveStatus,
+                            textColor = textColor
+                        )
+                    )
+
                     FormStyle.applyTextColorRecursively(container, settings)
-                    return@post
-                }
-
-                // Render Form Fields
-                fieldValueReaders.clear()
-                fieldValidators.clear()
-
-                if (form.fields.isEmpty()) {
-                    val emptyCard = LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        background = FormStyle.roundedBg(ctx, FormStyle.CARD_BG_COLOR, 10, FormStyle.STROKE_COLOR, 1)
-                        setPadding(pad, pad, pad, pad)
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply { topMargin = FormStyle.dp(ctx, 12) }
-                    }
-                    emptyCard.addView(
-                        createTextView(
-                            ctx,
-                            "This server has no custom questions, or you can submit your application directly.",
-                            14f,
-                            false,
-                            textColor
-                        )
-                    )
-                    container.addView(emptyCard)
-                } else {
-                    form.fields.forEachIndexed { index, field ->
-                        container.addView(buildFieldCard(ctx, index, field, textColor))
-                    }
-                }
-
-                // Action Buttons (Submit / Re-apply / Withdraw)
-                container.addView(
-                    buildActionsSection(
-                        ctx = ctx,
-                        view = view,
-                        form = form,
-                        effectiveName = effectiveName,
-                        effectiveStatus = effectiveStatus,
-                        textColor = textColor
-                    )
-                )
-
-                FormStyle.applyTextColorRecursively(container, settings)
                 } catch (t: Throwable) {
-                    // Building the page failed: show why instead of leaving a blank/loading page.
                     container.removeAllViews()
                     container.addView(
                         createTextView(
@@ -236,6 +265,75 @@ class ApplicationPage(
                 }
             }
         }
+    }
+
+    private fun buildStatusOnlyActionsSection(
+        ctx: Context,
+        view: View,
+        effectiveName: String,
+        textColor: Int
+    ): View {
+        val wrapper = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = FormStyle.dp(ctx, 12)
+                bottomMargin = FormStyle.dp(ctx, 28)
+            }
+        }
+
+        val resetBtn = createActionButton(ctx, "Reset Application Status (Start Fresh)", FormStyle.BLURPLE_COLOR, textColor) {
+            Utils.threadPool.execute {
+                val res = ApplicationApi.resetGuildApplication(guildId)
+                Utils.mainThread.post {
+                    if (res.ok) {
+                        ApplicationStore.upsert(
+                            settings,
+                            SavedApplicationRecord(
+                                guildId = guildId,
+                                guildName = effectiveName,
+                                requestId = res.requestId,
+                                status = res.applicationStatus ?: "STARTED",
+                                inviteCode = inviteCode
+                            )
+                        )
+                        Utils.showToast("Application reset to STARTED")
+                        if (isAdded) onViewBound(view)
+                    } else {
+                        Utils.showToast("Reset failed: ${res.errorMessage}")
+                    }
+                }
+            }
+        }
+        wrapper.addView(resetBtn)
+
+        val withdrawBtn = createActionButton(ctx, "Withdraw / Cancel Application", FormStyle.RED_COLOR, textColor) {
+            Utils.threadPool.execute {
+                val res = ApplicationApi.withdrawGuildApplication(guildId)
+                Utils.mainThread.post {
+                    if (res.ok) {
+                        ApplicationStore.upsert(
+                            settings,
+                            SavedApplicationRecord(
+                                guildId = guildId,
+                                guildName = effectiveName,
+                                status = "WITHDRAWN",
+                                inviteCode = inviteCode
+                            )
+                        )
+                        Utils.showToast("Application withdrawn successfully")
+                        if (isAdded) onViewBound(view)
+                    } else {
+                        Utils.showToast("Withdraw failed: ${res.errorMessage}")
+                    }
+                }
+            }
+        }
+        wrapper.addView(withdrawBtn)
+
+        return wrapper
     }
 
     @SuppressLint("SetTextI18n")
@@ -540,58 +638,7 @@ class ApplicationPage(
         }
         wrapper.addView(submitBtn)
 
-        val resetBtn = createActionButton(ctx, "Reset Application Status (Start Fresh)", FormStyle.BLURPLE_COLOR, textColor) {
-            Utils.threadPool.execute {
-                val res = ApplicationApi.resetGuildApplication(guildId)
-                Utils.mainThread.post {
-                    if (res.ok) {
-                        ApplicationStore.upsert(
-                            settings,
-                            SavedApplicationRecord(
-                                guildId = guildId,
-                                guildName = effectiveName,
-                                guildIcon = form.guildIcon,
-                                requestId = res.requestId ?: form.requestId,
-                                status = res.applicationStatus ?: "STARTED",
-                                inviteCode = inviteCode,
-                                formDescription = form.description
-                            )
-                        )
-                        Utils.showToast("Application reset to STARTED")
-                        if (isAdded) onViewBound(view)
-                    } else {
-                        Utils.showToast("Reset failed: ${res.errorMessage}")
-                    }
-                }
-            }
-        }
-        wrapper.addView(resetBtn)
-
-        val withdrawBtn = createActionButton(ctx, "Withdraw / Cancel Application", FormStyle.RED_COLOR, textColor) {
-            Utils.threadPool.execute {
-                val res = ApplicationApi.withdrawGuildApplication(guildId)
-                Utils.mainThread.post {
-                    if (res.ok) {
-                        ApplicationStore.upsert(
-                            settings,
-                            SavedApplicationRecord(
-                                guildId = guildId,
-                                guildName = effectiveName,
-                                guildIcon = form.guildIcon,
-                                status = "WITHDRAWN",
-                                inviteCode = inviteCode,
-                                formDescription = form.description
-                            )
-                        )
-                        Utils.showToast("Application withdrawn successfully")
-                        if (isAdded) onViewBound(view)
-                    } else {
-                        Utils.showToast("Withdraw failed: ${res.errorMessage}")
-                    }
-                }
-            }
-        }
-        wrapper.addView(withdrawBtn)
+        wrapper.addView(buildStatusOnlyActionsSection(ctx, view, effectiveName, textColor))
 
         return wrapper
     }

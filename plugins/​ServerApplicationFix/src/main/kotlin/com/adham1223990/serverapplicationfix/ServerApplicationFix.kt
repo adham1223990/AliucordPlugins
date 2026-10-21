@@ -36,7 +36,6 @@ class ServerApplicationFix : Plugin() {
     }
 
     override fun start(context: Context) {
-        // Ensure default text color is Pure White (#FFFFFF) if not set
         if (settings.getString(FormStyle.KEY_TEXT_COLOR, null) == null) {
             settings.setString(FormStyle.KEY_TEXT_COLOR, FormStyle.DEFAULT_TEXT_COLOR_HEX)
         }
@@ -46,7 +45,6 @@ class ServerApplicationFix : Plugin() {
             Utils.openPageWithProxy(ctx, page)
         }
 
-        // 1. Inject "View Applications Status" button in Discord Settings using Shop plugin's exact approach
         patcher.patch(
             WidgetSettings::class.java,
             "onViewBound",
@@ -64,15 +62,8 @@ class ServerApplicationFix : Plugin() {
             }
         )
 
-        // 2. Patch Member Verification & Join Request widgets to fix "View Application Status"
         hookMemberVerificationWidgets()
-
-        // 3. Replace the native "Complete" submit, which fails with
-        // "Failed to update your settings. Please try again." (see patchNativeSubmit)
         patchNativeSubmit()
-
-        // 4. When the native screen can't load the form it shows "Oops! Looks like that didn't
-        // work" and closes; open this plugin's own page (real status / real error) instead.
         patchInvalidVerificationState()
     }
 
@@ -156,12 +147,10 @@ class ServerApplicationFix : Plugin() {
                             val rootView = extractRootView(thisObj, param.args) ?: return@Hook
                             val guildId = extractGuildIdFromObject(thisObj)
                                 ?: StoreStream.getGuildSelected().selectedGuildId
+                            val inviteCode = extractInviteCodeFromObject(thisObj)
 
-                            // Apply user's preferred text color (default Pure White #FFFFFF)
                             FormStyle.applyTextColorRecursively(rootView, settings)
-
-                            // Intercept "View Application Status" / "Complete" / "Apply" buttons
-                            interceptApplicationStatusButtons(rootView, guildId)
+                            interceptApplicationStatusButtons(rootView, guildId, inviteCode)
                         })
                     }
                 }
@@ -170,27 +159,9 @@ class ServerApplicationFix : Plugin() {
         }
     }
 
-    // ---------------------------------------------------------------------------------------
-    // Native member-verification "Complete" button fix
-    // ---------------------------------------------------------------------------------------
-
     @Volatile
     private var nativeSubmitting = false
 
-    /**
-     * Discord's own WidgetMemberVerificationViewModel.applyToJoinGuild() sends the form with only
-     * the handful of fields its old model knows (field_type, label, required, values, choices,
-     * response) and then has to parse the server's answer with a strict parser that throws when
-     * "values"/"choices" are missing. Any failure in either step ends in the generic, useless
-     * "Failed to update your settings" toast, with no way to see what the server said.
-     *
-     * This replaces that call: it re-reads the current form from the server (every field exactly
-     * as the server sent it), fills in what the user answered on the native screen, submits it
-     * through ApplicationApi (Http.Request.newDiscordRNRequest only), and then tells the native
-     * screen the same thing it would have been told on success, so its normal "pending" /
-     * "welcome" dialogs and closing behaviour still happen. On failure the real Discord error
-     * message is shown instead of the generic one.
-     */
     private fun patchNativeSubmit() {
         try {
             val vmClass = Class.forName(
@@ -238,6 +209,9 @@ class ServerApplicationFix : Plugin() {
     private fun handleNativeSubmit(vm: Any) {
         if (nativeSubmitting) return
         val guildId = (findFieldValue(vm, "guildId") as? Long) ?: return
+        val inviteCode = (findFieldValue(vm, "inviteCode") as? String)
+            ?: extractInviteCodeFromObject(vm)
+            ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
         val viewState = callNoArg(vm, "getViewState")
         val termsApproved = (viewState?.let { callNoArg(it, "isTermsApproved") } as? Boolean) ?: false
         val guildObj = viewState?.let { callNoArg(it, "getGuild") }
@@ -251,7 +225,7 @@ class ServerApplicationFix : Plugin() {
         Utils.showToast("Submitting application...", false)
         Utils.threadPool.execute {
             try {
-                val form = ApplicationApi.fetchMemberVerificationForm(guildId).getOrElse { err ->
+                val form = ApplicationApi.fetchMemberVerificationForm(guildId, inviteCode).getOrElse { err ->
                     Utils.mainThread.post {
                         Utils.showToast("Could not load the application form: ${err.message}", true)
                     }
@@ -281,6 +255,7 @@ class ServerApplicationFix : Plugin() {
                                 status = status,
                                 rejectionReason = res.rejectionReason,
                                 submittedAt = res.submittedAt,
+                                inviteCode = inviteCode,
                                 formDescription = form.description
                             )
                         )
@@ -302,8 +277,6 @@ class ServerApplicationFix : Plugin() {
         }
     }
 
-    // Tell the native screen the submit worked, the same way its own success path does
-    // (it closes itself and shows the "pending" or "welcome" dialog).
     private fun emitNativeSuccess(vm: Any, guildId: Long, guildName: String?, status: String, lastSeen: String?) {
         try {
             val loader = vm.javaClass.classLoader
@@ -324,7 +297,6 @@ class ServerApplicationFix : Plugin() {
                 String::class.java
             )
             ctor.isAccessible = true
-            // Native success handling expects lastSeen == null for an instantly approved request.
             val event = ctor.newInstance(
                 guildId,
                 guildName,
@@ -333,7 +305,6 @@ class ServerApplicationFix : Plugin() {
             )
 
             val subject = findFieldValue(vm, "eventSubject") ?: return
-            // The app itself calls eventSubject.k.onNext(event); fall back to onNext on the subject.
             val inner = runCatching { findFieldValue(subject, "k") }.getOrNull()
             val candidates = listOfNotNull(inner, subject)
             for (target in candidates) {
@@ -348,10 +319,6 @@ class ServerApplicationFix : Plugin() {
         }
     }
 
-    // When the native member-verification screen ends up in its "Invalid" state (its own form load
-    // failed, or the application already exists) it just toasts a generic "Oops!" and closes
-    // itself. Replace that with this plugin's page, which shows the real application status or
-    // the real error from Discord.
     private fun patchInvalidVerificationState() {
         try {
             val widgetClass = Class.forName(
@@ -369,13 +336,16 @@ class ServerApplicationFix : Plugin() {
                     val widget = cf.thisObject ?: return@PreHook
                     val vm = callNoArg(widget, "getViewModel") ?: return@PreHook
                     val guildId = (findFieldValue(vm, "guildId") as? Long) ?: return@PreHook
+                    val inviteCode = (findFieldValue(vm, "inviteCode") as? String)
+                        ?: extractInviteCodeFromObject(vm)
+                        ?: extractInviteCodeFromObject(widget)
+                        ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
 
-                    // Skip the original (generic toast + finish) and show our page instead.
                     cf.result = null
                     val activity = callNoArg(widget, "requireActivity") as? Activity
                     val ctx = activity ?: Utils.appActivity
                     val guildName = StoreStream.getGuilds().guilds[guildId]?.name
-                    val page = ApplicationPage(settings, guildId, guildName)
+                    val page = ApplicationPage(settings, guildId, guildName, inviteCode)
                     ApplicationsSettingsPage.openPage?.invoke(ctx, page)
                         ?: Utils.openPageWithProxy(ctx, page)
                     activity?.finish()
@@ -385,7 +355,7 @@ class ServerApplicationFix : Plugin() {
         }
     }
 
-    private fun interceptApplicationStatusButtons(root: View, guildId: Long) {
+    private fun interceptApplicationStatusButtons(root: View, guildId: Long, inviteCode: String? = null) {
         val queue = ArrayDeque<View>()
         queue.add(root)
 
@@ -403,15 +373,17 @@ class ServerApplicationFix : Plugin() {
                         val targetGuildId = if (guildId > 0L) guildId else StoreStream.getGuildSelected().selectedGuildId
                         if (targetGuildId > 0L) {
                             val guildName = StoreStream.getGuilds().guilds[targetGuildId]?.name
+                            val effectiveInvite = inviteCode ?: ApplicationStore.getByGuildId(settings, targetGuildId)?.inviteCode
                             ApplicationStore.upsert(
                                 settings,
                                 SavedApplicationRecord(
                                     guildId = targetGuildId,
                                     guildName = guildName ?: "Server $targetGuildId",
-                                    status = "STARTED"
+                                    status = "STARTED",
+                                    inviteCode = effectiveInvite
                                 )
                             )
-                            val page = ApplicationPage(settings, targetGuildId, guildName)
+                            val page = ApplicationPage(settings, targetGuildId, guildName, effectiveInvite)
                             ApplicationsSettingsPage.openPage?.invoke(v.context, page)
                                 ?: Utils.openPageWithProxy(v.context, page)
                         } else {
@@ -458,6 +430,30 @@ class ServerApplicationFix : Plugin() {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    private fun extractInviteCodeFromObject(instance: Any): String? {
+        try {
+            var c: Class<*>? = instance.javaClass
+            while (c != null) {
+                for (field in c.declaredFields) {
+                    field.isAccessible = true
+                    val v = field.get(instance) ?: continue
+                    val fName = field.name.lowercase()
+                    if (fName.contains("invite") && v is String) {
+                        return ApplicationApi.cleanInviteCode(v)
+                    }
+                    if (v.javaClass.simpleName.contains("Invite", ignoreCase = true)) {
+                        val code = runCatching { callNoArg(v, "getCode") as? String }.getOrNull()
+                            ?: runCatching { findFieldValue(v, "code") as? String }.getOrNull()
+                        if (!code.isNullOrBlankSafe()) return ApplicationApi.cleanInviteCode(code)
+                    }
+                }
+                c = c.superclass
+            }
+        } catch (_: Throwable) {
+        }
+        return null
     }
 
     override fun stop(context: Context) {
