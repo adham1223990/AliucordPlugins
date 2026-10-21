@@ -47,18 +47,39 @@ data class JoinRequestResult(
 
 object ApplicationApi {
 
+    /**
+     * Accepts an invite code or any invite link and returns just the code, or null when the text
+     * isn't a valid invite code. Validation matters: a string like "INTENT_EXTRA_INVITE_GUILD"
+     * (a constant name from Discord's own code) used to be picked up as an "invite code" and sent
+     * to Discord, which kept the form from ever loading.
+     */
     fun cleanInviteCode(raw: String?): String? {
         if (raw.isNullOrBlankSafe()) return null
         var cleaned = raw.trim()
-        val slashIdx = cleaned.lastIndexOf('/')
-        if (slashIdx >= 0 && slashIdx < cleaned.length - 1) {
-            cleaned = cleaned.substring(slashIdx + 1)
+        val q = cleaned.indexOf('?')
+        if (q >= 0) cleaned = cleaned.substring(0, q)
+        val h = cleaned.indexOf('#')
+        if (h >= 0) cleaned = cleaned.substring(0, h)
+        while (cleaned.isNotEmpty() && cleaned[cleaned.length - 1] == '/') {
+            cleaned = cleaned.substring(0, cleaned.length - 1)
         }
-        val qIdx = cleaned.indexOf('?')
-        if (qIdx >= 0) {
-            cleaned = cleaned.substring(0, qIdx)
+        val slash = cleaned.lastIndexOf('/')
+        if (slash >= 0) cleaned = cleaned.substring(slash + 1)
+        cleaned = cleaned.trim()
+        return if (isValidInviteCode(cleaned)) cleaned else null
+    }
+
+    // Real invite codes are letters, digits and (for vanity links) hyphens. No underscores.
+    private fun isValidInviteCode(code: String): Boolean {
+        if (code.length < 2 || code.length > 32) return false
+        var i = 0
+        while (i < code.length) {
+            val c = code[i]
+            val ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+            if (!ok) return false
+            i++
         }
-        return cleaned.trim().orNullIfBlank()
+        return true
     }
 
     fun resolveInviteGuild(inviteCode: String): Triple<Long, String?, String?>? {

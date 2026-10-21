@@ -188,11 +188,42 @@ class ApplicationPage(
                         errorCard.addView(inviteInput)
 
                         val retryBtn = createActionButton(ctx, "Load Form with Invite Code / Retry", FormStyle.BLURPLE_COLOR, textColor) {
-                            val entered = ApplicationApi.cleanInviteCode(inviteInput.text?.toString())
-                            if (entered != null) {
-                                inviteCode = entered
+                            val raw = inviteInput.text?.toString()
+                            val entered = ApplicationApi.cleanInviteCode(raw)
+                            if (entered == null && !raw.isNullOrBlankSafe()) {
+                                Utils.showToast("That doesn't look like an invite code or link")
+                                return@createActionButton
                             }
-                            onViewBound(view)
+                            if (entered == null) {
+                                onViewBound(view)
+                                return@createActionButton
+                            }
+                            Utils.showToast("Checking invite...")
+                            Utils.threadPool.execute {
+                                val resolved = ApplicationApi.resolveInviteGuild(entered)
+                                Utils.mainThread.post {
+                                    if (resolved != null && resolved.first != guildId) {
+                                        // The invite belongs to a different server than this page
+                                        // was opened for: open that server's own page instead.
+                                        val (gId, gName, gIcon) = resolved
+                                        ApplicationStore.upsert(
+                                            settings,
+                                            SavedApplicationRecord(
+                                                guildId = gId,
+                                                guildName = gName ?: "Server $gId",
+                                                guildIcon = gIcon,
+                                                inviteCode = entered
+                                            )
+                                        )
+                                        val page = ApplicationPage(settings, gId, gName, entered)
+                                        ApplicationsSettingsPage.openPage?.invoke(ctx, page)
+                                            ?: Utils.openPageWithProxy(ctx, page)
+                                    } else {
+                                        inviteCode = entered
+                                        onViewBound(view)
+                                    }
+                                }
+                            }
                         }
                         errorCard.addView(retryBtn)
                         container.addView(errorCard)

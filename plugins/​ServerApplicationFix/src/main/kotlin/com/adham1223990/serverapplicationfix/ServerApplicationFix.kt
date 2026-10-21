@@ -209,7 +209,7 @@ class ServerApplicationFix : Plugin() {
     private fun handleNativeSubmit(vm: Any) {
         if (nativeSubmitting) return
         val guildId = (findFieldValue(vm, "guildId") as? Long) ?: return
-        val inviteCode = (findFieldValue(vm, "inviteCode") as? String)
+        val inviteCode = ApplicationApi.cleanInviteCode(findFieldValue(vm, "inviteCode") as? String)
             ?: extractInviteCodeFromObject(vm)
             ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
         val viewState = callNoArg(vm, "getViewState")
@@ -336,7 +336,7 @@ class ServerApplicationFix : Plugin() {
                     val widget = cf.thisObject ?: return@PreHook
                     val vm = callNoArg(widget, "getViewModel") ?: return@PreHook
                     val guildId = (findFieldValue(vm, "guildId") as? Long) ?: return@PreHook
-                    val inviteCode = (findFieldValue(vm, "inviteCode") as? String)
+                    val inviteCode = ApplicationApi.cleanInviteCode(findFieldValue(vm, "inviteCode") as? String)
                         ?: extractInviteCodeFromObject(vm)
                         ?: extractInviteCodeFromObject(widget)
                         ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
@@ -437,16 +437,20 @@ class ServerApplicationFix : Plugin() {
             var c: Class<*>? = instance.javaClass
             while (c != null) {
                 for (field in c.declaredFields) {
+                    // Static fields are constants such as INTENT_EXTRA_INVITE_GUILD, never a real code.
+                    if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
                     field.isAccessible = true
                     val v = field.get(instance) ?: continue
                     val fName = field.name.lowercase()
                     if (fName.contains("invite") && v is String) {
-                        return ApplicationApi.cleanInviteCode(v)
+                        val cleaned = ApplicationApi.cleanInviteCode(v)
+                        if (cleaned != null) return cleaned
                     }
                     if (v.javaClass.simpleName.contains("Invite", ignoreCase = true)) {
                         val code = runCatching { callNoArg(v, "getCode") as? String }.getOrNull()
                             ?: runCatching { findFieldValue(v, "code") as? String }.getOrNull()
-                        if (!code.isNullOrBlankSafe()) return ApplicationApi.cleanInviteCode(code)
+                        val cleaned = ApplicationApi.cleanInviteCode(code)
+                        if (cleaned != null) return cleaned
                     }
                 }
                 c = c.superclass
