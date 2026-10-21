@@ -73,6 +73,8 @@ object ApplicationApi {
         val route = "/" + path.trim().removePrefix("/").removePrefix("api/v9").removePrefix("/")
         val req = Http.Request.newDiscordRNRequest(route, method)
             .setHeader("Accept", "application/json")
+        // Without a timeout a stalled connection keeps the page loading indefinitely.
+        req.setRequestTimeout(20_000)
         if (guildId != null && guildId > 0L) {
             req.setHeader("X-Context-Properties", buildContextProperties(guildId, contextLocation))
         }
@@ -357,7 +359,11 @@ object ApplicationApi {
      * request is needed for that. Only when the store has nothing for this guild does it fall
      * back to the member-verification form request (through newDiscordRNRequest).
      */
-    fun fetchJoinRequestStatus(guildId: Long, requestId: String? = null): JoinRequestResult {
+    fun fetchJoinRequestStatus(
+        guildId: Long,
+        requestId: String? = null,
+        allowNetwork: Boolean = true
+    ): JoinRequestResult {
         try {
             // Typed as Any? and read through reflection on purpose: GuildJoinRequest's getters are
             // obfuscated single-letter names, but its fields keep their real names.
@@ -383,6 +389,10 @@ object ApplicationApi {
         } catch (_: Throwable) {
         }
 
+        // Nothing in the store: callers that already loaded the form don't need a second request.
+        if (!allowNetwork) {
+            return JoinRequestResult(ok = false, statusCode = 0, errorMessage = "No stored status")
+        }
         val formRes = fetchMemberVerificationForm(guildId)
         val form = formRes.getOrNull()
         return if (form != null) {

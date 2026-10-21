@@ -48,13 +48,29 @@ class ApplicationPage(
         container.addView(statusTitle)
 
         Utils.threadPool.execute {
-            val formResult = ApplicationApi.fetchMemberVerificationForm(guildId, inviteCode)
+            // Everything on this thread is guarded: an uncaught exception here used to leave the
+            // page on "Loading..." forever. Any failure now shows up as a normal error card.
+            var formResultVar: Result<VerificationFormResponse> =
+                Result.failure(IllegalStateException("Could not load the application form"))
+            var savedRecordVar: SavedApplicationRecord? = null
+            var refreshedStatusVar: JoinRequestResult? = null
+            try {
+                formResultVar = ApplicationApi.fetchMemberVerificationForm(guildId, inviteCode)
+                savedRecordVar = ApplicationStore.getByGuildId(settings, guildId)
+                // Status comes from the client's own join-request store (no extra request).
+                refreshedStatusVar = ApplicationApi.fetchJoinRequestStatus(
+                    guildId,
+                    savedRecordVar?.requestId,
+                    allowNetwork = false
+                )
+            } catch (t: Throwable) {
+                formResultVar = Result.failure(t)
+            }
+            val formResult = formResultVar
             // The cooldown route does not exist in the Discord client, so there is nothing to fetch.
             val cooldownSec = 0L
-            val savedRecord = ApplicationStore.getByGuildId(settings, guildId)
-
-            // Status now comes from the client's own join-request store (no request id needed).
-            val refreshedStatus = ApplicationApi.fetchJoinRequestStatus(guildId, savedRecord?.requestId)
+            val savedRecord = savedRecordVar
+            val refreshedStatus = refreshedStatusVar
 
             Utils.mainThread.post {
                 if (!isAdded) return@post
