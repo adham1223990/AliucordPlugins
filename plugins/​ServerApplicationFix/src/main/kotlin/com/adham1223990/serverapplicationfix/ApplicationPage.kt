@@ -44,6 +44,8 @@ class ApplicationPage(
         val pad = FormStyle.dp(ctx, 16)
         container.setPadding(pad, pad, pad, pad)
 
+        // Build marker + toast: proves this exact version of the page is the one that is running.
+        Utils.showToast("Application page v5 opened (server $guildId)", false)
         val statusTitle = createTextView(ctx, "Loading server application status...", 16f, true, textColor)
         container.addView(statusTitle)
 
@@ -54,13 +56,13 @@ class ApplicationPage(
         fun setStage(stage: String) {
             loadStage.set(stage)
             Utils.mainThread.post {
-                if (!loadDone.get() && isAdded) {
+                if (!loadDone.get()) {
                     statusTitle.text = "Loading server application status...\n($stage)"
                 }
             }
         }
         Utils.mainThread.postDelayed({
-            if (!loadDone.get() && isAdded) {
+            if (!loadDone.get()) {
                 statusTitle.text = "Still loading after 30s.\nStopped at: ${loadStage.get()}\n" +
                     "Check your connection, then press back and open this page again."
             }
@@ -95,7 +97,6 @@ class ApplicationPage(
 
             Utils.mainThread.post {
                 loadDone.set(true)
-                if (!isAdded) return@post
                 try {
                 container.removeAllViews()
 
