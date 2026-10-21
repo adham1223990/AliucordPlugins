@@ -152,7 +152,9 @@ class ApplicationsSettingsPage(
                     val resolved = ApplicationApi.resolveInviteGuild(code)
                     Utils.mainThread.post {
                         if (resolved != null) {
-                            val (gId, gName, gIcon) = resolved
+                            val gId = resolved.guildId
+                            val gName = resolved.guildName
+                            val gIcon = resolved.guildIcon
                             ApplicationStore.upsert(
                                 settings,
                                 SavedApplicationRecord(

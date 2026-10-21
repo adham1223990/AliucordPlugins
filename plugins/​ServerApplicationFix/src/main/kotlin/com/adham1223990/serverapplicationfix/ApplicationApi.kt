@@ -8,6 +8,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
+data class ResolvedInviteGuild(
+    val guildId: Long,
+    val guildName: String?,
+    val guildIcon: String?
+)
+
 data class VerificationField(
     val fieldType: String,
     val label: String,
@@ -82,7 +88,7 @@ object ApplicationApi {
         return true
     }
 
-    fun resolveInviteGuild(inviteCode: String): Triple<Long, String?, String?>? {
+    fun resolveInviteGuild(inviteCode: String): ResolvedInviteGuild? {
         val code = cleanInviteCode(inviteCode) ?: return null
         return try {
             val res = createSafeRNRequest(
@@ -97,7 +103,7 @@ object ApplicationApi {
                 val id = guildObj.optString("id", "").toLongOrNull() ?: return null
                 val name = guildObj.optString("name", "").orNullIfBlank()
                 val icon = guildObj.optString("icon", "").orNullIfBlank()
-                Triple(id, name, icon)
+                ResolvedInviteGuild(id, name, icon)
             } else null
         } catch (_: Throwable) {
             null

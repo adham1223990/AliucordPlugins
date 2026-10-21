@@ -202,10 +202,10 @@ class ApplicationPage(
                             Utils.threadPool.execute {
                                 val resolved = ApplicationApi.resolveInviteGuild(entered)
                                 Utils.mainThread.post {
-                                    if (resolved != null && resolved.first != guildId) {
-                                        // The invite belongs to a different server than this page
-                                        // was opened for: open that server's own page instead.
-                                        val (gId, gName, gIcon) = resolved
+                                    if (resolved != null && resolved.guildId != guildId) {
+                                        val gId = resolved.guildId
+                                        val gName = resolved.guildName
+                                        val gIcon = resolved.guildIcon
                                         ApplicationStore.upsert(
                                             settings,
                                             SavedApplicationRecord(
