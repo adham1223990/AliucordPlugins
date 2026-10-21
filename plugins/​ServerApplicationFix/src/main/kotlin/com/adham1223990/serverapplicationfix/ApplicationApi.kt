@@ -53,12 +53,6 @@ data class JoinRequestResult(
 
 object ApplicationApi {
 
-    /**
-     * Accepts an invite code or any invite link and returns just the code, or null when the text
-     * isn't a valid invite code. Validation matters: a string like "INTENT_EXTRA_INVITE_GUILD"
-     * (a constant name from Discord's own code) used to be picked up as an "invite code" and sent
-     * to Discord, which kept the form from ever loading.
-     */
     fun cleanInviteCode(raw: String?): String? {
         if (raw.isNullOrBlankSafe()) return null
         var cleaned = raw.trim()
@@ -75,7 +69,6 @@ object ApplicationApi {
         return if (isValidInviteCode(cleaned)) cleaned else null
     }
 
-    // Real invite codes are letters, digits and (for vanity links) hyphens. No underscores.
     private fun isValidInviteCode(code: String): Boolean {
         if (code.length < 2 || code.length > 32) return false
         var i = 0
@@ -107,6 +100,19 @@ object ApplicationApi {
             } else null
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    private fun acceptInviteSilently(inviteCode: String, guildId: Long) {
+        val code = cleanInviteCode(inviteCode) ?: return
+        try {
+            createSafeRNRequest(
+                "/invites/${URLEncoder.encode(code, "UTF-8")}",
+                "POST",
+                guildId,
+                "Accept Invite Page"
+            ).setHeader("Content-Type", "application/json").executeWithBody("{}")
+        } catch (_: Throwable) {
         }
     }
 
@@ -247,9 +253,19 @@ object ApplicationApi {
     fun submitGuildApplication(
         guildId: Long,
         version: String?,
-        fieldsWithResponses: List<Pair<VerificationField, Any?>>
+        fieldsWithResponses: List<Pair<VerificationField, Any?>>,
+        inviteCode: String? = null
     ): JoinRequestResult {
         return try {
+            val cleanedInvite = cleanInviteCode(inviteCode)
+
+            // If we have an invite code and the user is not in the guild yet, accepting the invite
+            // first puts the user into the pending/join-request state so Discord does not return
+            // 50001 Missing Access on PUT /guilds/{id}/requests/@me.
+            if (cleanedInvite != null) {
+                acceptInviteSilently(cleanedInvite, guildId)
+            }
+
             val formFieldsPayload = JSONArray()
             for ((field, userResponse) in fieldsWithResponses) {
                 val fieldCopy = JSONObject(field.rawObject.toString())
@@ -277,22 +293,74 @@ object ApplicationApi {
                 formFieldsPayload.put(fieldCopy)
             }
 
-            val payload = JSONObject().apply {
+            val basePayload = JSONObject().apply {
                 put("form_fields", formFieldsPayload)
                 if (!version.isNullOrBlankSafe()) {
                     put("version", version)
                 }
             }
 
-            val response = createSafeRNRequest(
-                "/guilds/$guildId/requests/@me",
-                "PUT",
-                guildId,
-                "Guild Member Verification"
-            ).setHeader("Content-Type", "application/json").executeWithBody(payload.toString())
+            val plainRoute = "/guilds/$guildId/requests/@me"
 
-            val code = response.statusCode
-            val text = readBody(response)
+            var response: Http.Response? = null
+
+            // Attempt 1: If we have an invite code, send it in the query string and body (invite_key)
+            if (cleanedInvite != null) {
+                val encoded = URLEncoder.encode(cleanedInvite, "UTF-8")
+                val payloadWithKey = JSONObject(basePayload.toString()).apply {
+                    put("invite_key", cleanedInvite)
+                }
+                response = runCatching {
+                    createSafeRNRequest(
+                        "$plainRoute?invite_code=$encoded",
+                        "PUT",
+                        guildId,
+                        "Accept Invite Page"
+                    ).setHeader("Content-Type", "application/json")
+                        .executeWithBody(payloadWithKey.toString())
+                }.getOrNull()
+
+                // Attempt 2: Query string invite_code with standard body (no extra invite_key field)
+                if (response == null || response.statusCode !in 200..299) {
+                    val secondTry = runCatching {
+                        createSafeRNRequest(
+                            "$plainRoute?invite_code=$encoded",
+                            "PUT",
+                            guildId,
+                            "Accept Invite Page"
+                        ).setHeader("Content-Type", "application/json")
+                            .executeWithBody(basePayload.toString())
+                    }.getOrNull()
+                    if (secondTry != null && (secondTry.statusCode in 200..299 || response == null)) {
+                        response = secondTry
+                    }
+                }
+            }
+
+            // Attempt 3: Standard mobile client call without invite_code query param
+            if (response == null || response.statusCode !in 200..299) {
+                val thirdTry = runCatching {
+                    createSafeRNRequest(
+                        plainRoute,
+                        "PUT",
+                        guildId,
+                        "Guild Member Verification"
+                    ).setHeader("Content-Type", "application/json")
+                        .executeWithBody(basePayload.toString())
+                }.getOrNull()
+                if (thirdTry != null && (thirdTry.statusCode in 200..299 || response == null)) {
+                    response = thirdTry
+                }
+            }
+
+            val finalRes = response ?: return JoinRequestResult(
+                ok = false,
+                statusCode = -1,
+                errorMessage = "No response from Discord"
+            )
+
+            val code = finalRes.statusCode
+            val text = readBody(finalRes)
             if (code in 200..299) {
                 val json = if (text.isNotBlankSafe()) JSONObject(text) else JSONObject()
                 val reqObj = json.optJSONObject("guild_join_request") ?: json
@@ -345,11 +413,20 @@ object ApplicationApi {
                     rawJson = reqObj
                 )
             } else {
-                JoinRequestResult(
-                    ok = false,
-                    statusCode = code,
-                    errorMessage = parseDiscordError(code, text)
-                )
+                val parsedErr = parseDiscordError(code, text)
+                if (parsedErr.contains("150003")) {
+                    JoinRequestResult(
+                        ok = true,
+                        statusCode = 200,
+                        applicationStatus = "STARTED"
+                    )
+                } else {
+                    JoinRequestResult(
+                        ok = false,
+                        statusCode = code,
+                        errorMessage = parsedErr
+                    )
+                }
             }
         } catch (t: Throwable) {
             JoinRequestResult(
@@ -378,11 +455,20 @@ object ApplicationApi {
                     applicationStatus = "WITHDRAWN"
                 )
             } else {
-                JoinRequestResult(
-                    ok = false,
-                    statusCode = code,
-                    errorMessage = parseDiscordError(code, text)
-                )
+                val parsedErr = parseDiscordError(code, text)
+                if (parsedErr.contains("150003")) {
+                    JoinRequestResult(
+                        ok = true,
+                        statusCode = 200,
+                        applicationStatus = "WITHDRAWN"
+                    )
+                } else {
+                    JoinRequestResult(
+                        ok = false,
+                        statusCode = code,
+                        errorMessage = parsedErr
+                    )
+                }
             }
         } catch (t: Throwable) {
             JoinRequestResult(

@@ -635,10 +635,12 @@ class ApplicationPage(
 
             Utils.showToast("Submitting application...")
             Utils.threadPool.execute {
+                val effectiveInvite = inviteCode ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
                 val res = ApplicationApi.submitGuildApplication(
                     guildId = guildId,
                     version = form.version,
-                    fieldsWithResponses = payloadPairs
+                    fieldsWithResponses = payloadPairs,
+                    inviteCode = effectiveInvite
                 )
                 Utils.mainThread.post {
                     if (res.ok) {
@@ -655,7 +657,7 @@ class ApplicationPage(
                                 interviewChannelId = res.interviewChannelId,
                                 submittedAt = res.submittedAt,
                                 actionedAt = res.actionedAt,
-                                inviteCode = inviteCode,
+                                inviteCode = effectiveInvite,
                                 formDescription = form.description
                             )
                         )
