@@ -6,6 +6,7 @@ import com.aliucord.utils.ReflectUtils
 import com.discord.stores.StoreStream
 import org.json.JSONArray
 import org.json.JSONObject
+import java.lang.reflect.Modifier
 import java.net.URLEncoder
 
 data class ResolvedInviteGuild(
@@ -81,6 +82,74 @@ object ApplicationApi {
         return true
     }
 
+    /**
+     * Searches Discord's own StoreInviteSettings in memory for any invite code belonging to this
+     * guildId (or the most recently viewed invite), so the user does not have to type it manually.
+     */
+    fun findInviteCodeInDiscordStores(guildId: Long): String? {
+        try {
+            val inviteStore = StoreStream.getInviteSettings() ?: return null
+            var c: Class<*>? = inviteStore.javaClass
+            var fallbackCode: String? = null
+            while (c != null && c != Any::class.java) {
+                for (field in c.declaredFields) {
+                    if (Modifier.isStatic(field.modifiers)) continue
+                    field.isAccessible = true
+                    val value = field.get(inviteStore) ?: continue
+                    val extracted = extractCodeFromStoreValue(value, guildId)
+                    if (extracted != null) {
+                        if (extracted.second == guildId) return extracted.first
+                        if (fallbackCode == null) fallbackCode = extracted.first
+                    }
+                }
+                c = c.superclass
+            }
+            return fallbackCode
+        } catch (_: Throwable) {
+            return null
+        }
+    }
+
+    private fun extractCodeFromStoreValue(value: Any, targetGuildId: Long, depth: Int = 0): Pair<String, Long>? {
+        if (depth > 3) return null
+        try {
+            if (value is String) {
+                val cleaned = cleanInviteCode(value)
+                if (cleaned != null) return cleaned to 0L
+            }
+            if (value is Map<*, *>) {
+                for ((k, v) in value) {
+                    if (v != null) {
+                        val sub = extractCodeFromStoreValue(v, targetGuildId, depth + 1)
+                        if (sub != null) {
+                            if (sub.second == targetGuildId) return sub
+                            if (k is String) {
+                                val kClean = cleanInviteCode(k)
+                                if (kClean != null && sub.second > 0L) return kClean to sub.second
+                            }
+                        }
+                    }
+                }
+            }
+            val simple = value.javaClass.simpleName
+            if (simple.contains("Invite", ignoreCase = true) || simple.contains("State", ignoreCase = true)) {
+                val code = (runCatching { value.javaClass.getMethod("getCode").invoke(value) as? String }.getOrNull())
+                    ?: (runCatching { ReflectUtils.getField(value, "code") as? String }.getOrNull())
+                val guildObj = (runCatching { value.javaClass.getMethod("getGuild").invoke(value) }.getOrNull())
+                    ?: (runCatching { ReflectUtils.getField(value, "guild") }.getOrNull())
+                val gId = if (guildObj != null) {
+                    (runCatching { guildObj.javaClass.getMethod("getId").invoke(guildObj) as? Long }.getOrNull())
+                        ?: (runCatching { ReflectUtils.getField(guildObj, "id") as? Long }.getOrNull())
+                        ?: 0L
+                } else 0L
+                val cleaned = cleanInviteCode(code)
+                if (cleaned != null) return cleaned to gId
+            }
+        } catch (_: Throwable) {
+        }
+        return null
+    }
+
     fun resolveInviteGuild(inviteCode: String): ResolvedInviteGuild? {
         val code = cleanInviteCode(inviteCode) ?: return null
         return try {
@@ -103,24 +172,46 @@ object ApplicationApi {
         }
     }
 
-    private fun acceptInviteSilently(inviteCode: String, guildId: Long) {
-        val code = cleanInviteCode(inviteCode) ?: return
-        try {
-            createSafeRNRequest(
-                "/invites/${URLEncoder.encode(code, "UTF-8")}",
-                "POST",
-                guildId,
-                "Accept Invite Page"
-            ).setHeader("Content-Type", "application/json").executeWithBody("{}")
-        } catch (_: Throwable) {
+    /**
+     * Ensures the user has accepted the invite or initialized the join request session so Discord
+     * does not reject PUT /guilds/{id}/requests/@me with 50001 Missing Access.
+     */
+    private fun ensureGuildJoinSession(guildId: Long, inviteCode: String?) {
+        val code = cleanInviteCode(inviteCode) ?: findInviteCodeInDiscordStores(guildId)
+        if (code != null) {
+            try {
+                val sessionId = runCatching { StoreStream.getGatewaySocket().sessionId }.getOrNull()
+                val payload = JSONObject().apply {
+                    if (!sessionId.isNullOrBlankSafe()) {
+                        put("session_id", sessionId)
+                    }
+                }
+                createSafeRNRequest(
+                    "/invites/${URLEncoder.encode(code, "UTF-8")}",
+                    "POST",
+                    guildId,
+                    "Accept Invite Page"
+                ).setHeader("Content-Type", "application/json")
+                    .executeWithBody(payload.toString())
+            } catch (_: Throwable) {
+            }
         }
     }
 
-    private fun buildContextProperties(guildId: Long, location: String = "Accept Invite Page"): String {
+    private fun buildContextProperties(
+        guildId: Long,
+        location: String = "Accept Invite Page",
+        inviteCode: String? = null
+    ): String {
         return try {
             val json = JSONObject().apply {
                 put("location", location)
-                put("location_guild_id", guildId.toString())
+                if (guildId > 0L) {
+                    put("location_guild_id", guildId.toString())
+                }
+                if (!inviteCode.isNullOrBlankSafe()) {
+                    put("invite_code", inviteCode)
+                }
             }
             Base64.encodeToString(json.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         } catch (_: Throwable) {
@@ -132,14 +223,18 @@ object ApplicationApi {
         path: String,
         method: String,
         guildId: Long? = null,
-        contextLocation: String = "Guild Member Verification"
+        contextLocation: String = "Guild Member Verification",
+        inviteCode: String? = null
     ): Http.Request {
         val route = "/" + path.trim().removePrefix("/").removePrefix("api/v9").removePrefix("/")
         val req = Http.Request.newDiscordRNRequest(route, method)
             .setHeader("Accept", "application/json")
         req.setRequestTimeout(20_000)
-        if (guildId != null && guildId > 0L) {
-            req.setHeader("X-Context-Properties", buildContextProperties(guildId, contextLocation))
+        if ((guildId != null && guildId > 0L) || !inviteCode.isNullOrBlankSafe()) {
+            req.setHeader(
+                "X-Context-Properties",
+                buildContextProperties(guildId ?: 0L, contextLocation, inviteCode)
+            )
         }
         return req
     }
@@ -147,7 +242,7 @@ object ApplicationApi {
     fun fetchMemberVerificationForm(guildId: Long, inviteCode: String? = null): Result<VerificationFormResponse> {
         return runCatching {
             val plainRoute = "/guilds/$guildId/member-verification"
-            val cleanedInvite = cleanInviteCode(inviteCode)
+            val cleanedInvite = cleanInviteCode(inviteCode) ?: findInviteCodeInDiscordStores(guildId)
 
             val response = if (cleanedInvite != null) {
                 val encoded = URLEncoder.encode(cleanedInvite, "UTF-8")
@@ -156,7 +251,8 @@ object ApplicationApi {
                         "$plainRoute?with_guild=true&invite_code=$encoded",
                         "GET",
                         guildId,
-                        "Accept Invite Page"
+                        "Accept Invite Page",
+                        cleanedInvite
                     ).execute()
                 }.getOrNull()
 
@@ -257,14 +353,7 @@ object ApplicationApi {
         inviteCode: String? = null
     ): JoinRequestResult {
         return try {
-            val cleanedInvite = cleanInviteCode(inviteCode)
-
-            // If we have an invite code and the user is not in the guild yet, accepting the invite
-            // first puts the user into the pending/join-request state so Discord does not return
-            // 50001 Missing Access on PUT /guilds/{id}/requests/@me.
-            if (cleanedInvite != null) {
-                acceptInviteSilently(cleanedInvite, guildId)
-            }
+            val cleanedInvite = cleanInviteCode(inviteCode) ?: findInviteCodeInDiscordStores(guildId)
 
             val formFieldsPayload = JSONArray()
             for ((field, userResponse) in fieldsWithResponses) {
@@ -300,11 +389,11 @@ object ApplicationApi {
                 }
             }
 
-            val plainRoute = "/guilds/$guildId/requests/@me"
-
+            val requestsRoute = "/guilds/$guildId/requests/@me"
+            val verificationRoute = "/guilds/$guildId/member-verification"
             var response: Http.Response? = null
 
-            // Attempt 1: If we have an invite code, send it in the query string and body (invite_key)
+            // Step 1: Try PUT /guilds/{id}/requests/@me with invite_code in query & invite_key in body
             if (cleanedInvite != null) {
                 val encoded = URLEncoder.encode(cleanedInvite, "UTF-8")
                 val payloadWithKey = JSONObject(basePayload.toString()).apply {
@@ -312,22 +401,23 @@ object ApplicationApi {
                 }
                 response = runCatching {
                     createSafeRNRequest(
-                        "$plainRoute?invite_code=$encoded",
+                        "$requestsRoute?invite_code=$encoded",
                         "PUT",
                         guildId,
-                        "Accept Invite Page"
+                        "Accept Invite Page",
+                        cleanedInvite
                     ).setHeader("Content-Type", "application/json")
                         .executeWithBody(payloadWithKey.toString())
                 }.getOrNull()
 
-                // Attempt 2: Query string invite_code with standard body (no extra invite_key field)
                 if (response == null || response.statusCode !in 200..299) {
                     val secondTry = runCatching {
                         createSafeRNRequest(
-                            "$plainRoute?invite_code=$encoded",
+                            "$requestsRoute?invite_code=$encoded",
                             "PUT",
                             guildId,
-                            "Accept Invite Page"
+                            "Accept Invite Page",
+                            cleanedInvite
                         ).setHeader("Content-Type", "application/json")
                             .executeWithBody(basePayload.toString())
                     }.getOrNull()
@@ -337,19 +427,64 @@ object ApplicationApi {
                 }
             }
 
-            // Attempt 3: Standard mobile client call without invite_code query param
+            // Step 2: Try plain PUT /guilds/{id}/requests/@me
             if (response == null || response.statusCode !in 200..299) {
-                val thirdTry = runCatching {
+                val plainTry = runCatching {
                     createSafeRNRequest(
-                        plainRoute,
+                        requestsRoute,
                         "PUT",
                         guildId,
-                        "Guild Member Verification"
+                        "Guild Member Verification",
+                        cleanedInvite
                     ).setHeader("Content-Type", "application/json")
                         .executeWithBody(basePayload.toString())
                 }.getOrNull()
-                if (thirdTry != null && (thirdTry.statusCode in 200..299 || response == null)) {
-                    response = thirdTry
+                if (plainTry != null && (plainTry.statusCode in 200..299 || response == null)) {
+                    response = plainTry
+                }
+            }
+
+            // Step 3: If it failed with 50001 Missing Access or 403/404, accept the invite session
+            // first and retry both /requests/@me and /member-verification.
+            if (response == null || response.statusCode !in 200..299) {
+                if (cleanedInvite != null) {
+                    ensureGuildJoinSession(guildId, cleanedInvite)
+                    val encoded = URLEncoder.encode(cleanedInvite, "UTF-8")
+                    val afterJoinTry = runCatching {
+                        createSafeRNRequest(
+                            "$requestsRoute?invite_code=$encoded",
+                            "PUT",
+                            guildId,
+                            "Guild Member Verification",
+                            cleanedInvite
+                        ).setHeader("Content-Type", "application/json")
+                            .executeWithBody(basePayload.toString())
+                    }.getOrNull()
+                    if (afterJoinTry != null && afterJoinTry.statusCode in 200..299) {
+                        response = afterJoinTry
+                    }
+                }
+
+                // Step 4: Fallback to PUT /guilds/{id}/member-verification (used by older/rules-only guilds)
+                if (response == null || response.statusCode !in 200..299) {
+                    val verRoute = if (cleanedInvite != null) {
+                        "$verificationRoute?invite_code=${URLEncoder.encode(cleanedInvite, "UTF-8")}"
+                    } else {
+                        verificationRoute
+                    }
+                    val verTry = runCatching {
+                        createSafeRNRequest(
+                            verRoute,
+                            "PUT",
+                            guildId,
+                            "Guild Member Verification",
+                            cleanedInvite
+                        ).setHeader("Content-Type", "application/json")
+                            .executeWithBody(basePayload.toString())
+                    }.getOrNull()
+                    if (verTry != null && verTry.statusCode in 200..299) {
+                        response = verTry
+                    }
                 }
             }
 
@@ -376,10 +511,16 @@ object ApplicationApi {
                     rawJson = reqObj
                 )
             } else {
+                val err = parseDiscordError(code, text)
+                val extraHint = if ((code == 403 || err.contains("50001") || err.contains("Missing Access", true)) && cleanedInvite == null) {
+                    "$err — Please enter the server's Invite Code below so Discord allows submitting from outside the server."
+                } else {
+                    err
+                }
                 JoinRequestResult(
                     ok = false,
                     statusCode = code,
-                    errorMessage = parseDiscordError(code, text)
+                    errorMessage = extraHint
                 )
             }
         } catch (t: Throwable) {

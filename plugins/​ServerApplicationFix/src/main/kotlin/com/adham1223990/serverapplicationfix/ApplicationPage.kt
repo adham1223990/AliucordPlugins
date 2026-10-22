@@ -74,6 +74,7 @@ class ApplicationPage(
 
                 val effectiveInvite = ApplicationApi.cleanInviteCode(inviteCode)
                     ?: ApplicationApi.cleanInviteCode(savedRecordVar?.inviteCode)
+                    ?: ApplicationApi.findInviteCodeInDiscordStores(guildId)
                 inviteCode = effectiveInvite
 
                 setStage("requesting the form from Discord")
@@ -595,6 +596,7 @@ class ApplicationPage(
         return card
     }
 
+    @SuppressLint("SetTextI18n")
     private fun buildActionsSection(
         ctx: Context,
         view: View,
@@ -603,6 +605,7 @@ class ApplicationPage(
         effectiveStatus: String,
         textColor: Int
     ): View {
+        val pad = FormStyle.dp(ctx, 14)
         val wrapper = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
@@ -613,6 +616,43 @@ class ApplicationPage(
                 bottomMargin = FormStyle.dp(ctx, 28)
             }
         }
+
+        val inviteBox = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = FormStyle.roundedBg(ctx, FormStyle.CARD_BG_COLOR, 10, FormStyle.STROKE_COLOR, 1)
+            setPadding(pad, pad, pad, pad)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = FormStyle.dp(ctx, 8)
+            }
+        }
+        inviteBox.addView(
+            createTextView(
+                ctx,
+                "Invite Code / Link (required by Discord if you get 'Missing Access'):",
+                13f,
+                true,
+                textColor
+            )
+        )
+        val inviteInput = EditText(ctx).apply {
+            setText(inviteCode ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode ?: "")
+            hint = "Optional Invite Code or Link (e.g. discord.gg/abc)"
+            setTextColor(textColor)
+            setHintTextColor(FormStyle.withAlpha(textColor, 150))
+            textSize = 14f
+            background = FormStyle.roundedBg(ctx, FormStyle.INPUT_BG_COLOR, 8, FormStyle.STROKE_COLOR, 1)
+            val iPad = FormStyle.dp(ctx, 10)
+            setPadding(iPad, iPad, iPad, iPad)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = FormStyle.dp(ctx, 8) }
+        }
+        inviteBox.addView(inviteInput)
+        wrapper.addView(inviteBox)
 
         val submitBtnText = if (effectiveStatus.equals("SUBMITTED", true) || effectiveStatus.equals("PENDING", true)) {
             "Update / Resubmit Application"
@@ -633,9 +673,16 @@ class ApplicationPage(
                 field to reader.invoke()
             }
 
+            val typedInvite = ApplicationApi.cleanInviteCode(inviteInput.text?.toString())
+            if (typedInvite != null) {
+                inviteCode = typedInvite
+            }
+
             Utils.showToast("Submitting application...")
             Utils.threadPool.execute {
-                val effectiveInvite = inviteCode ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
+                val effectiveInvite = inviteCode
+                    ?: ApplicationStore.getByGuildId(settings, guildId)?.inviteCode
+                    ?: ApplicationApi.findInviteCodeInDiscordStores(guildId)
                 val res = ApplicationApi.submitGuildApplication(
                     guildId = guildId,
                     version = form.version,
@@ -664,7 +711,7 @@ class ApplicationPage(
                         Utils.showToast("Application submitted! Status: $newStatus")
                         if (isAdded) onViewBound(view)
                     } else {
-                        Utils.showToast("Submission failed: ${res.errorMessage}")
+                        Utils.showToast("Submission failed: ${res.errorMessage}", true)
                     }
                 }
             }
