@@ -3,8 +3,6 @@ package com.adham1223990.addattachmenttoedit
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.content.res.ColorStateList
-import android.graphics.Color
 import android.net.Uri
 import android.view.View
 import android.widget.LinearLayout
@@ -17,7 +15,10 @@ import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
+import com.discord.api.permission.Permission
 import com.discord.models.user.CoreUser
+import com.discord.utilities.color.ColorCompat
+import com.discord.utilities.permissions.PermissionUtils
 import com.discord.stores.StoreStream
 import com.discord.widgets.chat.MessageContent
 import com.discord.widgets.chat.MessageManager
@@ -33,8 +34,14 @@ import kotlin.jvm.functions.Function1
 class AddAttachmentToEdit : Plugin() {
 
     companion object {
-        private const val PICK_IMAGE_REQUEST_CODE = 822562
-        private const val EXTRA_PICK_IMAGES_MAX = "android.provider.extra.PICK_IMAGES_MAX"
+        // FragmentActivity only accepts request codes that fit in the lower 16 bits; anything
+        // bigger throws "Can only use lower 16 bits for requestCode" before the picker opens.
+        private const val PICK_FILES_REQUEST_CODE = 0x4A3D
+
+        // Same limits Vencord's AddAttachments uses.
+        private const val TYPE_DEFAULT = 0
+        private const val TYPE_REPLY = 19
+        private const val FLAG_IS_VOICE_MESSAGE = 8192L
     }
 
     private val addAttachmentViewId = View.generateViewId()
@@ -45,6 +52,32 @@ class AddAttachmentToEdit : Plugin() {
         patchMessageActionsMenu()
         patchActivityResult()
         patchNativeEditAttachments()
+    }
+
+    /**
+     * Mirrors Vencord's `canAddAttachments` + the popover button's own checks:
+     * default/reply message, not a voice message, sent by me, fewer than 10 attachments, and
+     * SEND_MESSAGES in the channel.
+     */
+    private fun canAddAttachments(model: WidgetChatListActions.Model): Boolean {
+        val message = model.getMessage() ?: return false
+        val type = message.getType() ?: TYPE_DEFAULT
+        if (type != TYPE_DEFAULT && type != TYPE_REPLY) return false
+        if (message.hasFlag(FLAG_IS_VOICE_MESSAGE)) return false
+        if (message.isLocal() || message.isEphemeralMessage()) return false
+
+        val myId = StoreStream.getUsers().me.getId()
+        val authorId = CoreUser(message.getAuthor()).getId()
+        if (authorId != myId) return false
+
+        if (AttachmentEditUploader.getExistingAttachmentIds(message).size >= AttachmentEditUploader.MAX_ATTACHMENTS) {
+            return false
+        }
+
+        // DMs have no computed permissions; guild channels need SEND_MESSAGES.
+        val permissions = model.getPermissions()
+        if (permissions != null && !PermissionUtils.can(Permission.SEND_MESSAGES, permissions)) return false
+        return true
     }
 
     private fun patchMessageActionsMenu() {
@@ -59,57 +92,59 @@ class AddAttachmentToEdit : Plugin() {
                     val message = model.getMessage() ?: return@Hook
                     val actions = cf.thisObject as WidgetChatListActions
 
-                    val myId = StoreStream.getUsers().me.getId()
-                    val authorId = CoreUser(message.getAuthor()).getId()
-                    if (authorId != myId) return@Hook
-
                     val scrollView = actions.view as? NestedScrollView ?: return@Hook
-                    val lay = scrollView.getChildAt(0) as LinearLayout
-                    if (lay.findViewById<View>(addAttachmentViewId) != null) return@Hook
+                    val lay = scrollView.getChildAt(0) as? LinearLayout ?: return@Hook
 
-                    val row = TextView(
-                        lay.context,
-                        null,
-                        0,
-                        com.lytefast.flexinput.R.i.UiKit_Settings_Item_Icon
-                    )
-                    row.id = addAttachmentViewId
-                    row.text = "Add Attachment"
-                    row.setCompoundDrawablesWithIntrinsicBounds(
-                        android.R.drawable.ic_input_add, 0, 0, 0
-                    )
-                    val iconPadding = (12 * lay.context.resources.displayMetrics.density).toInt()
-                    row.compoundDrawablePadding = iconPadding
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                        row.compoundDrawableTintList = ColorStateList.valueOf(Color.WHITE)
+                    // Reuse the row if configureUI runs again for the same sheet, but always
+                    // refresh its visibility and click listener so it never targets a stale message.
+                    var row = lay.findViewById<TextView>(addAttachmentViewId)
+                    if (row == null) {
+                        row = createMenuRow(lay)
                     }
+
+                    if (!canAddAttachments(model)) {
+                        row.visibility = View.GONE
+                        return@Hook
+                    }
+                    row.visibility = View.VISIBLE
+
                     row.setOnClickListener {
                         val channelId = message.getChannelId()
                         val messageId = message.getId()
-                        actions.dismiss()
-
                         val existingCount = AttachmentEditUploader.getExistingAttachmentIds(message).size
                         val remainingSlots = AttachmentEditUploader.MAX_ATTACHMENTS - existingCount
+                        actions.dismiss()
+
                         if (remainingSlots <= 0) {
-                            Utils.showToast("Maximum of 10 attachments reached.", true)
+                            Utils.showToast("You cannot add more attachments to this message.", true)
                             return@setOnClickListener
                         }
 
-                        launchImagePicker(remainingSlots) { uris ->
-                            if (uris.isEmpty()) return@launchImagePicker
-                            if (existingCount + uris.size > AttachmentEditUploader.MAX_ATTACHMENTS) {
+                        launchFilePicker { uris ->
+                            if (uris.isEmpty()) return@launchFilePicker
+                            if (uris.size > remainingSlots) {
                                 Utils.showToast(
-                                    "Cannot add ${uris.size} attachments. Only $remainingSlots slot(s) remaining (max 10).",
+                                    "You can only add $remainingSlots more attachment(s) to this message.",
                                     true
                                 )
-                                return@launchImagePicker
+                                return@launchFilePicker
                             }
-                            Utils.showToast("Uploading ${uris.size} attachment(s)...", false)
+                            val limit = AttachmentEditUploader.maxFileBytes()
+                            val tooBig = uris.any { uri -> querySize(uri) > limit }
+                            if (tooBig) {
+                                Utils.showToast("A selected file is ${AttachmentEditUploader.limitMessage()}", true)
+                                return@launchFilePicker
+                            }
+                            Utils.showToast("Uploading, this can take a while...", false)
                             Utils.threadPool.execute {
                                 try {
                                     AttachmentEditUploader.addAttachments(channelId, messageId, uris, null)
                                     Utils.mainThread.post {
-                                        Utils.showToast("Attachment(s) added.", false)
+                                        Utils.showToast(
+                                            if (uris.size == 1) "Attachment added successfully!"
+                                            else "Attachments added successfully!",
+                                            false
+                                        )
                                     }
                                 } catch (e: Throwable) {
                                     tag.error("Failed to add attachment", e)
@@ -120,12 +155,32 @@ class AddAttachmentToEdit : Plugin() {
                             }
                         }
                     }
-                    lay.addView(row, 5)
                 } catch (e: Throwable) {
-                    tag.error("Failed to inject the Add Attachment button", e)
+                    tag.error("Failed to inject the Add Attachments button", e)
                 }
             }
         )
+    }
+
+    /**
+     * Builds a menu row that looks exactly like Discord's own entries (same style as the Edit row,
+     * same text colour, same icon tint) and places it right below "Edit".
+     */
+    private fun createMenuRow(lay: LinearLayout): TextView {
+        val ctx = lay.context
+        val editRow = lay.findViewById<TextView>(Utils.getResId("dialog_chat_actions_edit", "id"))
+        val row = TextView(ctx, null, 0, com.lytefast.flexinput.R.i.UiKit_Settings_Item_Icon)
+        row.id = addAttachmentViewId
+        row.text = "Add Attachments"
+
+        val iconColor = ColorCompat.getThemedColor(ctx, Utils.getResId("colorInteractiveNormal", "attr"))
+        val iconSize = (24 * ctx.resources.displayMetrics.density + 0.5f).toInt()
+        row.setCompoundDrawablesRelativeWithIntrinsicBounds(UploadIconDrawable(iconColor, iconSize), null, null, null)
+        if (editRow != null) row.setTextColor(editRow.textColors)
+
+        val editIndex = if (editRow != null) lay.indexOfChild(editRow) else -1
+        if (editIndex >= 0) lay.addView(row, editIndex + 1) else lay.addView(row)
+        return row
     }
 
     private fun patchNativeEditAttachments() {
@@ -396,24 +451,32 @@ class AddAttachmentToEdit : Plugin() {
         }
     }
 
-    private fun launchImagePicker(maxSelection: Int, callback: (List<Uri>) -> Unit) {
-        pickerCallback = callback
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "image/*"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, maxSelection > 1)
-            if (maxSelection > 1) {
-                putExtra(EXTRA_PICK_IMAGES_MAX, maxSelection)
+    // Opens the system file picker for any file type with multi-select, like Vencord's file input.
+    private fun querySize(uri: Uri): Long {
+        try {
+            Utils.appActivity.contentResolver.query(
+                uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) return cursor.getLong(0)
             }
+        } catch (_: Throwable) {
+        }
+        return -1L
+    }
+
+    private fun launchFilePicker(callback: (List<Uri>) -> Unit) {
+        pickerCallback = callback
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
         try {
-            Utils.appActivity.startActivityForResult(
-                Intent.createChooser(intent, "Select up to $maxSelection image(s)"),
-                PICK_IMAGE_REQUEST_CODE
-            )
+            Utils.appActivity.startActivityForResult(intent, PICK_FILES_REQUEST_CODE)
         } catch (e: Throwable) {
             pickerCallback = null
-            tag.error("Failed to launch the image picker", e)
-            Utils.showToast("Could not open the image picker.", true)
+            tag.error("Failed to launch the file picker", e)
+            Utils.showToast("Could not open the file picker.", true)
         }
     }
 
@@ -427,7 +490,7 @@ class AddAttachmentToEdit : Plugin() {
             ),
             Hook { cf ->
                 val requestCode = cf.args[0] as Int
-                if (requestCode != PICK_IMAGE_REQUEST_CODE) return@Hook
+                if (requestCode != PICK_FILES_REQUEST_CODE) return@Hook
                 val resultCode = cf.args[1] as Int
                 val data = cf.args[2] as? Intent
                 val selectedUris = ArrayList<Uri>()
