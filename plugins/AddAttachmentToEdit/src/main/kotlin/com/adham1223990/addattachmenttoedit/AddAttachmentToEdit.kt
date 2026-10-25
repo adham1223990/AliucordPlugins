@@ -138,7 +138,11 @@ class AddAttachmentToEdit : Plugin() {
                             Utils.showToast("Uploading, this can take a while...", false)
                             Utils.threadPool.execute {
                                 try {
-                                    AttachmentEditUploader.addAttachments(channelId, messageId, uris, null)
+                                    val completed = AttachmentEditUploader.addAttachments(channelId, messageId, uris, null)
+                                    if (!completed) {
+                                        Utils.mainThread.post { Utils.showToast("Upload cancelled.", false) }
+                                        return@execute
+                                    }
                                     Utils.mainThread.post {
                                         Utils.showToast(
                                             if (uris.size == 1) "Attachment added successfully!"
@@ -217,12 +221,16 @@ class AddAttachmentToEdit : Plugin() {
                         Utils.showToast("Uploading pasted attachment...", false)
                         Utils.threadPool.execute {
                             try {
-                                AttachmentEditUploader.addAttachments(
+                                val completed = AttachmentEditUploader.addAttachments(
                                     channelId,
                                     messageId,
                                     listOf(contentUri),
                                     null
                                 )
+                                if (!completed) {
+                                    Utils.mainThread.post { Utils.showToast("Upload cancelled.", false) }
+                                    return@execute
+                                }
                                 Utils.mainThread.post {
                                     Utils.showToast("Pasted attachment added to message.", false)
                                 }
@@ -330,7 +338,9 @@ class AddAttachmentToEdit : Plugin() {
                         }
                         if (uris.isEmpty()) return@PreHook
 
-                        val editedText = cf.args[0] as? String
+                        // args[0] is the text as displayed ("#room @name"); the real server text
+                        // ("<#id> <@id>") comes from the autocomplete model, so use that one.
+                        val editedText = resolveServerText(cf.thisObject, cf.args[0] as? String)
                         val channelId = message.getChannelId()
                         val messageId = message.getId()
 
@@ -341,12 +351,16 @@ class AddAttachmentToEdit : Plugin() {
                         Utils.showToast("Saving edit & uploading ${uris.size} attachment(s)...", false)
                         Utils.threadPool.execute {
                             try {
-                                AttachmentEditUploader.addAttachments(
+                                val completed = AttachmentEditUploader.addAttachments(
                                     channelId,
                                     messageId,
                                     uris,
                                     editedText
                                 )
+                                if (!completed) {
+                                    Utils.mainThread.post { Utils.showToast("Upload cancelled.", false) }
+                                    return@execute
+                                }
                                 Utils.mainThread.post {
                                     Utils.showToast("Message edited with attachment(s).", false)
                                 }
@@ -425,12 +439,16 @@ class AddAttachmentToEdit : Plugin() {
                         Utils.showToast("Saving edit & uploading ${uris.size} attachment(s)...", false)
                         Utils.threadPool.execute {
                             try {
-                                AttachmentEditUploader.addAttachments(
+                                val completed = AttachmentEditUploader.addAttachments(
                                     channelId,
                                     messageId,
                                     uris,
                                     editedText
                                 )
+                                if (!completed) {
+                                    Utils.mainThread.post { Utils.showToast("Upload cancelled.", false) }
+                                    return@execute
+                                }
                                 Utils.mainThread.post {
                                     Utils.showToast("Message edited with attachment(s).", false)
                                 }
@@ -452,6 +470,29 @@ class AddAttachmentToEdit : Plugin() {
     }
 
     // Opens the system file picker for any file type with multi-select, like Vencord's file input.
+    /**
+     * Returns the message text with mentions converted back to their server form
+     * (`<#channelId>`, `<@userId>`), exactly like Discord's own send path does through
+     * InputAutocomplete.getInputContent(). Falls back to [fallback] if anything is missing.
+     */
+    private fun resolveServerText(listener: Any?, fallback: String?): String? {
+        if (listener == null) return fallback
+        try {
+            val outerField = listener.javaClass.getDeclaredField("this\$0")
+            outerField.isAccessible = true
+            val chatInput = outerField.get(listener) ?: return fallback
+            val autocompleteField = chatInput.javaClass.getDeclaredField("autocomplete")
+            autocompleteField.isAccessible = true
+            val autocomplete = autocompleteField.get(chatInput) ?: return fallback
+            val content = autocomplete.javaClass.getMethod("getInputContent").invoke(autocomplete) as? MessageContent
+            val text = content?.textContent
+            if (text != null) return text
+        } catch (e: Throwable) {
+            tag.error("Could not resolve mention text, using the displayed text", e)
+        }
+        return fallback
+    }
+
     private fun querySize(uri: Uri): Long {
         try {
             Utils.appActivity.contentResolver.query(

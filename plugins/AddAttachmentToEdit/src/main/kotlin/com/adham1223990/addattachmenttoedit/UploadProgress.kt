@@ -23,6 +23,7 @@ class UploadProgress {
     private var title: TextView? = null
     private var detail: TextView? = null
     private var bar: ProgressBar? = null
+    private var cancelButton: TextView? = null
 
     @Volatile private var totalBytes = 0L
     @Volatile private var fileCount = 1
@@ -32,6 +33,10 @@ class UploadProgress {
     @Volatile private var stage = "Preparing…"
     @Volatile private var lastRender = 0L
     @Volatile private var dismissed = false
+    @Volatile private var cancelled = false
+
+    /** True once the user pressed Cancel; the uploader checks this between chunks and steps. */
+    val isCancelled: Boolean get() = cancelled
 
     private fun themed(attr: String, fallback: Int): Int {
         return try {
@@ -85,12 +90,34 @@ class UploadProgress {
                 val d = TextView(activity)
                 d.setTextColor(themed("colorTextMuted", Color.LTGRAY))
                 d.textSize = 12f
+
+                fun actionButton(label: String, color: Int, onClick: () -> Unit): TextView {
+                    val btn = TextView(activity)
+                    btn.text = label
+                    btn.setTextColor(color)
+                    btn.textSize = 13f
+                    btn.isClickable = true
+                    btn.setPadding(dp(12), dp(6), dp(12), dp(6))
+                    btn.setOnClickListener { onClick() }
+                    return btn
+                }
+
+                val hideBtn = actionButton("Hide", textColor) { hide() }
+                val cancelBtn = actionButton("Cancel", Color.parseColor("#ED4245")) { cancel() }
+
+                // Bottom row: "37% • 18.5 MB / 50.0 MB" on the left, Hide / Cancel on the right.
+                val row = LinearLayout(activity)
+                row.orientation = LinearLayout.HORIZONTAL
+                row.gravity = Gravity.CENTER_VERTICAL
+                row.addView(d, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(hideBtn)
+                row.addView(cancelBtn)
                 c.addView(
-                    d,
+                    row,
                     LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { topMargin = dp(6) }
+                    ).apply { topMargin = dp(4) }
                 )
 
                 val lp = FrameLayout.LayoutParams(
@@ -106,6 +133,7 @@ class UploadProgress {
                 title = t
                 detail = d
                 bar = b
+                cancelButton = cancelBtn
                 render(true)
             } catch (_: Throwable) {
                 // Progress UI is cosmetic; never let it break the upload.
@@ -137,6 +165,20 @@ class UploadProgress {
         stage = "Finishing…"
         sentBytes = totalBytes
         render(true)
+        // The message edit is the last step and cannot be undone half-way, so no more Cancel.
+        Utils.mainThread.post { cancelButton?.visibility = View.GONE }
+    }
+
+    /** Hides the card; the upload keeps running and the usual completion toast still appears. */
+    private fun hide() {
+        card?.visibility = View.GONE
+    }
+
+    private fun cancel() {
+        cancelled = true
+        stage = "Cancelling…"
+        render(true)
+        Utils.mainThread.post { cancelButton?.visibility = View.GONE }
     }
 
     fun dismiss() {

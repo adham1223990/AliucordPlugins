@@ -16,6 +16,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
+/** Thrown inside the uploader when the user presses Cancel on the progress card. */
+class UploadCancelledException : RuntimeException("Upload cancelled")
+
 object AttachmentEditUploader {
 
     const val MAX_ATTACHMENTS = 10
@@ -130,17 +133,24 @@ object AttachmentEditUploader {
         return getExistingAttachmentIds(message).size
     }
 
+    /**
+     * Uploads the files and edits the message. Returns true when finished, or false when the
+     * user cancelled from the progress card (nothing is changed on the message in that case).
+     */
     fun addAttachments(
         channelId: Long,
         messageId: Long,
         fileUris: List<Uri>,
         newContent: String? = null
-    ) {
-        if (fileUris.isEmpty()) return
+    ): Boolean {
+        if (fileUris.isEmpty()) return true
         val progress = UploadProgress()
         progress.show("Preparing…")
         try {
             uploadAndEdit(channelId, messageId, fileUris, newContent, progress)
+            return true
+        } catch (_: UploadCancelledException) {
+            return false
         } finally {
             progress.dismiss()
         }
@@ -191,6 +201,8 @@ object AttachmentEditUploader {
             sizeIdx++
         }
         progress.setTotal(totalSize, preparedFiles.size)
+
+        if (progress.isCancelled) throw UploadCancelledException()
 
         // Step 1: request upload slots from Discord for all files at once
         val filesJson = JSONArray()
@@ -244,6 +256,7 @@ object AttachmentEditUploader {
             val uploadFilename = slotInfo.getString("upload_filename")
             val file = preparedFiles[u]
 
+            if (progress.isCancelled) throw UploadCancelledException()
             progress.startFile(u, file.name)
             putFile(uploadUrl, file, progress)
 
@@ -255,6 +268,7 @@ object AttachmentEditUploader {
             u++
         }
 
+        if (progress.isCancelled) throw UploadCancelledException()
         progress.finishing()
 
         // Step 3: PATCH the message with existing + new attachments (and updated content if editing)
@@ -347,6 +361,7 @@ object AttachmentEditUploader {
                     val data = ByteArray(65536)
                     var n: Int
                     while (source.read(data, 0, data.size).also { read -> n = read } != -1) {
+                        if (progress.isCancelled) throw UploadCancelledException()
                         out.write(data, 0, n)
                         progress.addBytes(n.toLong())
                     }
