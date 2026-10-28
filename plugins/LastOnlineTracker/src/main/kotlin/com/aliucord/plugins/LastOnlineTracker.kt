@@ -169,7 +169,7 @@ class LastOnlineTracker : Plugin() {
     override fun start(context: Context) {
         loadRecords()
 
-        // 1. Standard Store observation for already-loaded presences
+        // 1. مراقبة الـ Store العادية للأصدقاء والحالات المحملة مسبقاً
         try {
             StoreStream.getPresences().observeAllPresences().subscribe {
                 val map: Map<Long, Presence> = this
@@ -182,60 +182,54 @@ class LastOnlineTracker : Plugin() {
             logger.error("presence subscription failed", e)
         }
 
-        // 2. Direct Gateway Hook on handlePresenceUpdate & handlePresenceReplace
-        // Catches the split-second mobile online spike BEFORE StoreUserPresence flattens/removes it,
-        // and checks sub-statuses (desktop/mobile/web) even if main status is masked.
+        // 2. الـ Hook المباشر على handlePresenceUpdate في StoreStream (بناءً على فحص الـ JADX)
+        // يلتقط الومضات الخاطفة للموبايل وتحديثات الحضور الخام فور ورودها
         try {
-            for (method in StoreStream::class.java.declaredMethods) {
-                if (method.name == "handlePresenceUpdate" && method.parameterTypes.size == 2) {
-                    patcher.patch(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                val apiPresence = param.args[1] as? com.discord.api.presence.Presence ?: return
-                                val userId = apiPresence.g() ?: apiPresence.f()?.id ?: return
-                                var effectiveStatus = apiPresence.e()
+            val method = StoreStream::class.java.getDeclaredMethod("handlePresenceUpdate", Long::class.javaPrimitiveType, com.discord.api.presence.Presence::class.java)
+            patcher.patch(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        val apiPresence = param.args[1] as? com.discord.api.presence.Presence ?: return
+                        val userId = apiPresence.g() ?: apiPresence.f()?.id ?: return
+                        var effectiveStatus = apiPresence.e()
 
-                                // Check platform-specific statuses (a = desktop, b = mobile, c = web)
-                                if (effectiveStatus == ClientStatus.OFFLINE || effectiveStatus == ClientStatus.INVISIBLE) {
-                                    val platforms = apiPresence.c()
-                                    if (platforms != null) {
-                                        val pStatus = listOf(platforms.a(), platforms.b(), platforms.c())
-                                            .firstOrNull { it != ClientStatus.OFFLINE && it != ClientStatus.INVISIBLE }
-                                        if (pStatus != null) effectiveStatus = pStatus
-                                    }
-                                }
-
-                                if (effectiveStatus != ClientStatus.OFFLINE && effectiveStatus != ClientStatus.INVISIBLE) {
-                                    recordStatus(userId, effectiveStatus)
-                                } else if (!apiPresence.b().isNullOrEmpty()) {
-                                    // Has active status/activity while appearing offline!
-                                    recordInvisibleActivity(userId, "Presence Activity")
-                                } else {
-                                    lastKnownStatus[userId] = ClientStatus.OFFLINE
-                                }
-                            } catch (e: Exception) {
-                                logger.error("handlePresenceUpdate hook", e)
+                        // فحص حالات الأجهزة الفرعية (Desktop / Mobile / Web) حتى لو كانت الحالة العامة مطفأة
+                        if (effectiveStatus == ClientStatus.OFFLINE || effectiveStatus == ClientStatus.INVISIBLE) {
+                            val platforms = apiPresence.c()
+                            if (platforms != null) {
+                                val pStatus = listOf(platforms.a(), platforms.b(), platforms.c())
+                                    .firstOrNull { it != ClientStatus.OFFLINE && it != ClientStatus.INVISIBLE }
+                                if (pStatus != null) effectiveStatus = pStatus
                             }
                         }
-                    })
+
+                        if (effectiveStatus != ClientStatus.OFFLINE && effectiveStatus != ClientStatus.INVISIBLE) {
+                            recordStatus(userId, effectiveStatus)
+                        } else if (!apiPresence.b().isNullOrEmpty()) {
+                            recordInvisibleActivity(userId, "Presence Activity")
+                        } else {
+                            lastKnownStatus[userId] = ClientStatus.OFFLINE
+                        }
+                    } catch (e: Exception) {
+                        logger.error("handlePresenceUpdate hook", e)
+                    }
                 }
-            }
+            })
         } catch (e: Exception) {
             logger.error("could not hook handlePresenceUpdate", e)
         }
 
-        // 3. Hook Message Create & Message Update (catches sending or editing a message while invisible)
+        // 3. Hook للرسائل (إرسال أو تعديل رسالة أثناء الاختفاء)
         try {
-            for (method in StoreStream::class.java.declaredMethods) {
-                if ((method.name == "handleMessageCreate" || method.name == "handleMessageUpdate") && method.parameterTypes.size == 1) {
-                    patcher.patch(method, object : XC_MethodHook() {
+            for (mMethod in StoreStream::class.java.declaredMethods) {
+                if ((mMethod.name == "handleMessageCreate" || mMethod.name == "handleMessageUpdate") && mMethod.parameterTypes.size == 1) {
+                    patcher.patch(mMethod, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             try {
                                 val message = param.args[0] ?: return
-                                val author = message.javaClass.getDeclaredMethod("getAuthor").apply { isAccessible = true }.invoke(message)
-                                    ?: message.javaClass.getMethod("getAuthor").invoke(message) ?: return
+                                val author = message.javaClass.getMethod("getAuthor").invoke(message) ?: return
                                 val authorId = extractLong(author, "getId", "a") ?: return
-                                val action = if (method.name == "handleMessageUpdate") "Edited Msg" else "Sent Msg"
+                                val action = if (mMethod.name == "handleMessageUpdate") "Edited Msg" else "Sent Msg"
                                 recordInvisibleActivity(authorId, action)
                             } catch (_: Exception) {}
                         }
@@ -246,64 +240,55 @@ class LastOnlineTracker : Plugin() {
             logger.error("could not hook messages", e)
         }
 
-        // 4. Hook Typing Start (catches invisible users the moment they touch the keyboard)
+        // 4. Hook لمؤشر الكتابة (Typing) لاكتشاف المتخفي فور لمس الكيبورد
         try {
-            for (method in StoreStream::class.java.declaredMethods) {
-                if (method.name == "handleTypingStart" && method.parameterTypes.size == 1) {
-                    patcher.patch(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                val typingUser = param.args[0] ?: return
-                                val userId = extractLong(typingUser, "getUserId", "b", "a") ?: return
-                                recordInvisibleActivity(userId, "Typing")
-                            } catch (_: Exception) {}
-                        }
-                    })
+            val typingMethod = StoreStream::class.java.getDeclaredMethod("handleTypingStart", com.discord.api.user.TypingUser::class.java)
+            patcher.patch(typingMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        val typingUser = param.args[0] ?: return
+                        val userId = extractLong(typingUser, "getUserId", "b", "a") ?: return
+                        recordInvisibleActivity(userId, "Typing")
+                    } catch (_: Exception) {}
                 }
-            }
+            })
         } catch (e: Exception) {
             logger.error("could not hook handleTypingStart", e)
         }
 
-        // 5. Hook Reactions Add & Remove (catches invisible users reacting/unreacting to messages)
+        // 5. Hook للريأكشنات (إضافة أو إزالة تفاعل)
         try {
-            for (method in StoreStream::class.java.declaredMethods) {
-                if ((method.name == "handleReactionAdd" || method.name == "handleReactionRemove") && method.parameterTypes.size == 1) {
-                    patcher.patch(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                val reaction = param.args[0] as? com.discord.api.message.reaction.MessageReactionUpdate ?: return
-                                val userId = reaction.d()
-                                recordInvisibleActivity(userId, "Reaction")
-                            } catch (_: Exception) {}
-                        }
-                    })
+            val reactionMethod = StoreStream::class.java.getDeclaredMethod("handleReactionAdd", com.discord.api.message.reaction.MessageReactionUpdate::class.java)
+            patcher.patch(reactionMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        val reaction = param.args[0] as? com.discord.api.message.reaction.MessageReactionUpdate ?: return
+                        val userId = reaction.d()
+                        recordInvisibleActivity(userId, "Reaction")
+                    } catch (_: Exception) {}
                 }
-            }
+            })
         } catch (e: Exception) {
             logger.error("could not hook reactions", e)
         }
 
-        // 6. Hook Voice State Update (catches invisible users joining/moving/muting in voice channels)
+        // 6. Hook للحالة الصوتية (Voice States) لدخول الرومات الصوتية
         try {
-            for (method in StoreStream::class.java.declaredMethods) {
-                if (method.name == "handleVoiceStateUpdate" && method.parameterTypes.size == 1) {
-                    patcher.patch(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                val voiceState = param.args[0] ?: return
-                                val userId = extractLong(voiceState, "getUserId", "c", "a") ?: return
-                                recordInvisibleActivity(userId, "Voice")
-                            } catch (_: Exception) {}
-                        }
-                    })
+            val voiceMethod = StoreStream::class.java.getDeclaredMethod("handleVoiceStateUpdate", com.discord.api.voice.state.VoiceState::class.java)
+            patcher.patch(voiceMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        val voiceState = param.args[0] ?: return
+                        val userId = extractLong(voiceState, "getUserId", "c", "a") ?: return
+                        recordInvisibleActivity(userId, "Voice")
+                    } catch (_: Exception) {}
                 }
-            }
+            })
         } catch (e: Exception) {
             logger.error("could not hook handleVoiceStateUpdate", e)
         }
 
-        // Inject the "Last Online:" row right after the About Me card
+        // حقن صفحة معلومات الظهور داخل البروفايل (User Sheet)
         patcher.after<WidgetUserSheet>(
             "configureNote",
             WidgetUserSheetViewModel.ViewState.Loaded::class.java,
