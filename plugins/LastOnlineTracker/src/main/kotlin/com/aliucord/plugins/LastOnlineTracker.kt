@@ -42,9 +42,10 @@ class LastOnlineTracker : Plugin() {
         var lastIdle: Long? = null,
         var lastDnd: Long? = null,
         var lastSeenOfflineMessage: Long? = null,
+        var lastInvisibleAction: String? = null,
     )
 
-    val defaultFormat = "dd/MM/yy, hh:mm a"
+    val defaultFormat = "dd/MM/yy, hh:mm:ss a"
 
     private fun timestampFormat(): String =
         settings.getString("timestamp_format", defaultFormat)
@@ -61,6 +62,7 @@ class LastOnlineTracker : Plugin() {
                     lastIdle = obj.optLong("idle", -1).takeIf { it != -1L },
                     lastDnd = obj.optLong("dnd", -1).takeIf { it != -1L },
                     lastSeenOfflineMessage = obj.optLong("msg", -1).takeIf { it != -1L },
+                    lastInvisibleAction = obj.optString("act", "").takeIf { it.isNotEmpty() }
                 )
             }
         } catch (e: Exception) {
@@ -77,6 +79,7 @@ class LastOnlineTracker : Plugin() {
                 record.lastIdle?.let { obj.put("idle", it) }
                 record.lastDnd?.let { obj.put("dnd", it) }
                 record.lastSeenOfflineMessage?.let { obj.put("msg", it) }
+                record.lastInvisibleAction?.let { obj.put("act", it) }
                 json.put(userId.toString(), obj)
             }
             settings.setString("presence_records", json.toString())
@@ -85,83 +88,222 @@ class LastOnlineTracker : Plugin() {
         }
     }
 
-    fun getLastOnlineText(userId: Long): String {
-        val record = records[userId]
-        val timestamps = listOfNotNull(
-            record?.lastOnline,
-            record?.lastIdle,
-            record?.lastDnd,
-            record?.lastSeenOfflineMessage,
-        )
-        val latest = timestamps.maxOrNull() ?: return "undetected yet"
+    private fun recordStatus(userId: Long, status: ClientStatus, now: Long = System.currentTimeMillis()) {
+        if (userId <= 0L) return
+        lastKnownStatus[userId] = status
+        val record = records.getOrPut(userId) { PresenceRecord() }
+        when (status) {
+            ClientStatus.ONLINE -> {
+                record.lastOnline = now
+                saveRecords()
+            }
+            ClientStatus.IDLE -> {
+                record.lastIdle = now
+                saveRecords()
+            }
+            ClientStatus.DND -> {
+                record.lastDnd = now
+                saveRecords()
+            }
+            else -> {}
+        }
+    }
 
-        return try {
+    private fun recordInvisibleActivity(userId: Long, actionName: String) {
+        if (userId <= 0L) return
+        val status = lastKnownStatus[userId]
+        if (status == null || status == ClientStatus.OFFLINE || status == ClientStatus.INVISIBLE) {
+            val record = records.getOrPut(userId) { PresenceRecord() }
+            record.lastSeenOfflineMessage = System.currentTimeMillis()
+            record.lastInvisibleAction = actionName
+            saveRecords()
+        }
+    }
+
+    private fun extractLong(obj: Any?, vararg methodNames: String): Long? {
+        if (obj == null) return null
+        val cls = obj.javaClass
+        for (name in methodNames) {
+            try {
+                val res = cls.getDeclaredMethod(name).apply { isAccessible = true }.invoke(obj)
+                if (res is Number) return res.toLong()
+            } catch (_: Exception) {}
+            try {
+                val res = cls.getMethod(name).invoke(obj)
+                if (res is Number) return res.toLong()
+            } catch (_: Exception) {}
+        }
+        for (fieldName in listOf("userId", "id")) {
+            try {
+                val f = cls.getDeclaredField(fieldName).apply { isAccessible = true }
+                val res = f.get(obj)
+                if (res is Number) return res.toLong()
+            } catch (_: Exception) {}
+        }
+        return null
+    }
+
+    fun getLastOnlineText(userId: Long): String {
+        val record = records[userId] ?: return "undetected yet"
+        val map = mutableMapOf<Long, String>()
+        record.lastOnline?.let { map[it] = "Online" }
+        record.lastIdle?.let { map[it] = "Idle" }
+        record.lastDnd?.let { map[it] = "DND" }
+        record.lastSeenOfflineMessage?.let {
+            val act = record.lastInvisibleAction ?: "Activity"
+            map[it] = "Invisible - $act"
+        }
+
+        val latest = map.keys.maxOrNull() ?: return "undetected yet"
+        val tag = map[latest] ?: ""
+
+        val formattedDate = try {
             SimpleDateFormat(timestampFormat(), Locale.getDefault()).format(Date(latest))
         } catch (e: Exception) {
             SimpleDateFormat(defaultFormat, Locale.getDefault()).format(Date(latest))
         }
+
+        return "$formattedDate ($tag)"
     }
 
     override fun start(context: Context) {
         loadRecords()
 
-        // Continuously track presence changes for every user, not just ones whose
-        // profile is currently open, so data is ready the moment it's needed.
-        // NOTE: RxUtils.subscribe takes an extension lambda (T.() -> Unit), so the
-        // receiver is accessed via `this`, not a named parameter.
+        // 1. Standard Store observation for already-loaded presences
         try {
             StoreStream.getPresences().observeAllPresences().subscribe {
                 val map: Map<Long, Presence> = this
                 val now = System.currentTimeMillis()
-
                 for ((userId, presence) in map) {
-                    val status = presence.status
-                    lastKnownStatus[userId] = status
-
-                    val record = records.getOrPut(userId) { PresenceRecord() }
-                    when (status) {
-                        ClientStatus.ONLINE -> record.lastOnline = now
-                        ClientStatus.IDLE -> record.lastIdle = now
-                        ClientStatus.DND -> record.lastDnd = now
-                        else -> {}
-                    }
+                    recordStatus(userId, presence.status, now)
                 }
-                saveRecords()
             }
         } catch (e: Exception) {
             logger.error("presence subscription failed", e)
         }
 
-        // Fallback: if we catch a message from someone whose last known status
-        // was offline/invisible, record that moment as our best guess.
+        // 2. Direct Gateway Hook on handlePresenceUpdate & handlePresenceReplace
+        // Catches the split-second mobile online spike BEFORE StoreUserPresence flattens/removes it,
+        // and checks sub-statuses (desktop/mobile/web) even if main status is masked.
         try {
-            val messageClass = Class.forName("com.discord.api.message.Message")
-            val handleMessageCreate = StoreStream::class.java.getDeclaredMethod("handleMessageCreate", messageClass)
+            for (method in StoreStream::class.java.declaredMethods) {
+                if (method.name == "handlePresenceUpdate" && method.parameterTypes.size == 2) {
+                    patcher.patch(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            try {
+                                val apiPresence = param.args[1] as? com.discord.api.presence.Presence ?: return
+                                val userId = apiPresence.g() ?: apiPresence.f()?.id ?: return
+                                var effectiveStatus = apiPresence.e()
 
-            patcher.patch(handleMessageCreate, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    try {
-                        val message = param.args[0] ?: return
-                        val author = message.javaClass.getMethod("getAuthor").invoke(message) ?: return
-                        val authorId = (author.javaClass.getMethod("getId").invoke(author) as? Number)?.toLong() ?: return
+                                // Check platform-specific statuses (a = desktop, b = mobile, c = web)
+                                if (effectiveStatus == ClientStatus.OFFLINE || effectiveStatus == ClientStatus.INVISIBLE) {
+                                    val platforms = apiPresence.c()
+                                    if (platforms != null) {
+                                        val pStatus = listOf(platforms.a(), platforms.b(), platforms.c())
+                                            .firstOrNull { it != ClientStatus.OFFLINE && it != ClientStatus.INVISIBLE }
+                                        if (pStatus != null) effectiveStatus = pStatus
+                                    }
+                                }
 
-                        val status = lastKnownStatus[authorId]
-                        if (status == null || status == ClientStatus.OFFLINE || status == ClientStatus.INVISIBLE) {
-                            val record = records.getOrPut(authorId) { PresenceRecord() }
-                            record.lastSeenOfflineMessage = System.currentTimeMillis()
-                            saveRecords()
+                                if (effectiveStatus != ClientStatus.OFFLINE && effectiveStatus != ClientStatus.INVISIBLE) {
+                                    recordStatus(userId, effectiveStatus)
+                                } else if (!apiPresence.b().isNullOrEmpty()) {
+                                    // Has active status/activity while appearing offline!
+                                    recordInvisibleActivity(userId, "Presence Activity")
+                                } else {
+                                    lastKnownStatus[userId] = ClientStatus.OFFLINE
+                                }
+                            } catch (e: Exception) {
+                                logger.error("handlePresenceUpdate hook", e)
+                            }
                         }
-                    } catch (e: Exception) {
-                        logger.error("message hook", e)
-                    }
+                    })
                 }
-            })
+            }
         } catch (e: Exception) {
-            logger.error("could not hook handleMessageCreate", e)
+            logger.error("could not hook handlePresenceUpdate", e)
         }
 
-        // Inject the "Last Online:" row right after the About Me card, inside the
-        // sheet's main content container.
+        // 3. Hook Message Create & Message Update (catches sending or editing a message while invisible)
+        try {
+            for (method in StoreStream::class.java.declaredMethods) {
+                if ((method.name == "handleMessageCreate" || method.name == "handleMessageUpdate") && method.parameterTypes.size == 1) {
+                    patcher.patch(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            try {
+                                val message = param.args[0] ?: return
+                                val author = message.javaClass.getDeclaredMethod("getAuthor").apply { isAccessible = true }.invoke(message)
+                                    ?: message.javaClass.getMethod("getAuthor").invoke(message) ?: return
+                                val authorId = extractLong(author, "getId", "a") ?: return
+                                val action = if (method.name == "handleMessageUpdate") "Edited Msg" else "Sent Msg"
+                                recordInvisibleActivity(authorId, action)
+                            } catch (_: Exception) {}
+                        }
+                    })
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("could not hook messages", e)
+        }
+
+        // 4. Hook Typing Start (catches invisible users the moment they touch the keyboard)
+        try {
+            for (method in StoreStream::class.java.declaredMethods) {
+                if (method.name == "handleTypingStart" && method.parameterTypes.size == 1) {
+                    patcher.patch(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            try {
+                                val typingUser = param.args[0] ?: return
+                                val userId = extractLong(typingUser, "getUserId", "b", "a") ?: return
+                                recordInvisibleActivity(userId, "Typing")
+                            } catch (_: Exception) {}
+                        }
+                    })
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("could not hook handleTypingStart", e)
+        }
+
+        // 5. Hook Reactions Add & Remove (catches invisible users reacting/unreacting to messages)
+        try {
+            for (method in StoreStream::class.java.declaredMethods) {
+                if ((method.name == "handleReactionAdd" || method.name == "handleReactionRemove") && method.parameterTypes.size == 1) {
+                    patcher.patch(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            try {
+                                val reaction = param.args[0] as? com.discord.api.message.reaction.MessageReactionUpdate ?: return
+                                val userId = reaction.d()
+                                recordInvisibleActivity(userId, "Reaction")
+                            } catch (_: Exception) {}
+                        }
+                    })
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("could not hook reactions", e)
+        }
+
+        // 6. Hook Voice State Update (catches invisible users joining/moving/muting in voice channels)
+        try {
+            for (method in StoreStream::class.java.declaredMethods) {
+                if (method.name == "handleVoiceStateUpdate" && method.parameterTypes.size == 1) {
+                    patcher.patch(method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            try {
+                                val voiceState = param.args[0] ?: return
+                                val userId = extractLong(voiceState, "getUserId", "c", "a") ?: return
+                                recordInvisibleActivity(userId, "Voice")
+                            } catch (_: Exception) {}
+                        }
+                    })
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("could not hook handleVoiceStateUpdate", e)
+        }
+
+        // Inject the "Last Online:" row right after the About Me card
         patcher.after<WidgetUserSheet>(
             "configureNote",
             WidgetUserSheetViewModel.ViewState.Loaded::class.java,
