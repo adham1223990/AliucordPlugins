@@ -8,7 +8,7 @@ configure<AliucordExtension> {
     changelog.set(
         """
         # 1.1.0
-        * Added direct gateway hooks to track split-second mobile online spikes.
+        * Fixed message hook error from debug log
         * Added support for detecting invisible users via typing, messages, reactions, and voice activity.
         # 1.0.0
         * Initial plugin release.
