@@ -122,18 +122,12 @@ class LastOnlineTracker : Plugin() {
         }
     }
 
-    private fun myUserId(): Long = try {
-        StoreStream.getUsers().me.getId()
-    } catch (_: Throwable) {
-        0L
-    }
-
     /**
      * Called when a user does something that is only possible while online (message, typing,
      * reaction, voice) but Discord still shows them as offline/unknown => they are invisible.
      */
     private fun recordInvisibleActivity(userId: Long, actionName: String) {
-        if (userId <= 0L || userId == myUserId()) return
+        if (userId <= 0L) return
         val status = lastKnownStatus[userId]
         if (status == null || status == ClientStatus.OFFLINE || status == ClientStatus.INVISIBLE) {
             val record = records.getOrPut(userId) { PresenceRecord() }
