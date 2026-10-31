@@ -163,7 +163,7 @@ internal class ReactionLogger(
                 safely("log reaction update") {
                     var dirty = false
                     (frame.args[0] as? List<*>)?.filterIsInstance<MessageReactionUpdate>()?.forEach { update ->
-                        val result = if (isAdd) restored(update) else removed(update)
+                        val result = !isAdd && removed(update)
                         if (result) dirty = true
                     }
                     if (dirty) onLogChanged()
@@ -366,12 +366,6 @@ internal class ReactionLogger(
             RemovedReaction(update.c(), update.a(), key, emoji.b(), emoji.d(), 0L, null, maxOf(reaction.a(), 1), System.currentTimeMillis()),
         )
         return true
-    }
-
-    /** The same user re-added the reaction, so it is no longer a removed one. */
-    private fun restored(update: MessageReactionUpdate): Boolean {
-        val key = update.b()?.c() ?: return false
-        return store.remove("${update.c()}|$key|${update.d()}")
     }
 
     private fun onLogChanged() {
@@ -623,14 +617,15 @@ internal object ReactionLogDialog {
         content.addView(ui.scroll(list, 0.55f), LinearLayout.LayoutParams(-1, -2))
         entries.sortedByDescending { it.timestamp }.take(150).forEach { entry ->
             val card = ui.card().apply { setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8)) }
-            val who = when {
-                entry.userId == 0L -> "Bulk removal · ${entry.count} reaction${if (entry.count == 1) "" else "s"}"
-                else -> "Removed by ${entry.userName ?: resolveName(entry.userId) ?: "user ${entry.userId}"}"
+            val who = if (entry.userId == 0L) {
+                "Removed by bulk removal (${entry.count} reaction${if (entry.count == 1) "" else "s"})"
+            } else {
+                "Removed by ${entry.userName ?: resolveName(entry.userId) ?: "Unknown user"} (${entry.userId})"
             }
             val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
             val labels = ui.column()
             labels.addView(ui.text(entry.label, 16f, ui.primary))
-            labels.addView(ui.text(who, 13f, ui.normal))
+            labels.addView(ui.text(who, 13f, ui.normal).apply { setTextIsSelectable(true) })
             labels.addView(ui.text(format.format(Date(entry.timestamp)), 12f, ui.muted))
             if (showIds) labels.addView(ui.text("Message ${entry.messageId}", 12f, ui.muted).apply { setTextIsSelectable(true) })
             header.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
