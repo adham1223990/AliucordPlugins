@@ -54,9 +54,11 @@ internal data class RemovedReaction(
     val userName: String?,
     val count: Int,
     val timestamp: Long,
+    /** The emoji exactly as Discord's own adapter serialized it; the only safe way to rebuild it. */
+    val emojiJson: String? = null,
 ) {
     val id get() = if (userId == 0L) "$messageId|$emojiKey|0|$timestamp" else "$messageId|$emojiKey|$userId"
-    val label get() = if (emojiId != null) ":${emojiName ?: emojiKey}:" else (emojiName ?: emojiKey)
+    val label get() = if (emojiId?.toLongOrNull() != null) ":${emojiName ?: emojiKey}:" else (emojiName ?: emojiKey)
 }
 
 /** Thread-safe, bounded log with a per-message index. */
@@ -292,9 +294,7 @@ internal class ReactionLogger(
         val tree = JSONObject(gson.toJson(message.synthesizeApiMessage()))
         val array = tree.optJSONArray("reactions") ?: JSONArray().also { tree.put("reactions", it) }
         missing.forEach { entry ->
-            val emoji = JSONObject()
-                .put("id", entry.emojiId ?: JSONObject.NULL)
-                .put("name", entry.emojiName ?: JSONObject.NULL)
+            val emoji = emojiJsonObject(entry)
             array.put(JSONObject().put("count", PLACEHOLDER_COUNT).put("me", false).put("emoji", emoji))
         }
         Message(gson.fromJson(tree.toString(), ApiMessage::class.java))
@@ -346,7 +346,7 @@ internal class ReactionLogger(
         emojiCache[key] = emoji
         val name = runCatching { StoreStream.getUsers().users[userId]?.username }.getOrNull()
         store.put(
-            RemovedReaction(update.c(), update.a(), key, emoji.b(), emoji.d(), userId, name, 1, System.currentTimeMillis()),
+            RemovedReaction(update.c(), update.a(), key, emoji.b(), emoji.d(), userId, name, 1, System.currentTimeMillis(), emojiJson(emoji)),
         )
         return true
     }
@@ -357,7 +357,7 @@ internal class ReactionLogger(
         if (!keep(0L, update.a())) return false
         emojiCache[key] = emoji
         store.put(
-            RemovedReaction(update.c(), update.a(), key, emoji.b(), emoji.d(), 0L, null, maxOf(reaction.a(), 1), System.currentTimeMillis()),
+            RemovedReaction(update.c(), update.a(), key, emoji.b(), emoji.d(), 0L, null, maxOf(reaction.a(), 1), System.currentTimeMillis(), emojiJson(emoji)),
         )
         return true
     }
@@ -377,15 +377,23 @@ internal class ReactionLogger(
         return items.filterIsInstance<MessageReaction>().filter { it.a() != PLACEHOLDER_COUNT }
     }
 
-    /** Built from JSON by field name, never by constructor, so the argument order cannot be wrong. */
+    private fun emojiJson(emoji: MessageReactionEmoji): String? =
+        runCatching { InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance.toJson(emoji) }.getOrNull()
+
+    /** Prefers Discord's own serialized emoji. The fallback only sets an id when it is really numeric. */
+    private fun emojiJsonObject(entry: RemovedReaction): JSONObject {
+        entry.emojiJson?.let { raw -> runCatching { return JSONObject(raw) } }
+        val id = entry.emojiId?.takeIf { it.toLongOrNull() != null }
+        return JSONObject()
+            .put("id", id ?: JSONObject.NULL)
+            .put("name", entry.emojiName ?: entry.emojiKey)
+            .put("animated", false)
+    }
+
     private fun emojiOf(entry: RemovedReaction): MessageReactionEmoji? = emojiCache[entry.emojiKey]
         ?: runCatching {
-            val json = JSONObject()
-                .put("id", entry.emojiId ?: JSONObject.NULL)
-                .put("name", entry.emojiName ?: JSONObject.NULL)
-                .put("animated", false)
             InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance
-                .fromJson(json.toString(), MessageReactionEmoji::class.java)
+                .fromJson(emojiJsonObject(entry).toString(), MessageReactionEmoji::class.java)
         }.getOrNull()?.also { emojiCache[entry.emojiKey] = it }
 
     private fun currentUserId(): Long = runCatching { StoreStream.getUsers().me.id }.getOrDefault(0L)
@@ -471,6 +479,7 @@ internal class ReactionLogger(
                             o.optString("un").takeIf { it.isNotEmpty() },
                             o.optInt("x", 1),
                             o.optLong("t"),
+                            o.optString("ej").takeIf { it.isNotEmpty() },
                         ),
                     )
                 }
@@ -500,7 +509,7 @@ internal class ReactionLogger(
                         .put("m", it.messageId).put("c", it.channelId).put("k", it.emojiKey)
                         .put("n", it.emojiName ?: "").put("i", it.emojiId ?: "")
                         .put("u", it.userId).put("un", it.userName ?: "")
-                        .put("x", it.count).put("t", it.timestamp),
+                        .put("x", it.count).put("t", it.timestamp).put("ej", it.emojiJson ?: ""),
                 )
             }
             val temp = File(file.parentFile, "$FILE_NAME.tmp")
