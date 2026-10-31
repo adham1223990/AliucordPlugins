@@ -138,12 +138,6 @@ internal class ReactionLogger(
 
     private class Decorated(val source: Message, val signature: Int, val result: Message)
 
-    private val emojiConstructor by lazy {
-        runCatching {
-            MessageReactionEmoji::class.java.getConstructor(String::class.java, String::class.java, java.lang.Boolean.TYPE)
-        }.getOrNull()
-    }
-
     private fun logging() = settings.getBool(Keys.LOG_REACTIONS, true)
     private fun showing() = settings.getBool(Keys.SHOW_REMOVED_REACTIONS, true)
 
@@ -383,9 +377,16 @@ internal class ReactionLogger(
         return items.filterIsInstance<MessageReaction>().filter { it.a() != PLACEHOLDER_COUNT }
     }
 
+    /** Built from JSON by field name, never by constructor, so the argument order cannot be wrong. */
     private fun emojiOf(entry: RemovedReaction): MessageReactionEmoji? = emojiCache[entry.emojiKey]
-        ?: runCatching { emojiConstructor?.newInstance(entry.emojiId, entry.emojiName, false) }.getOrNull()
-            ?.also { emojiCache[entry.emojiKey] = it }
+        ?: runCatching {
+            val json = JSONObject()
+                .put("id", entry.emojiId ?: JSONObject.NULL)
+                .put("name", entry.emojiName ?: JSONObject.NULL)
+                .put("animated", false)
+            InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance
+                .fromJson(json.toString(), MessageReactionEmoji::class.java)
+        }.getOrNull()?.also { emojiCache[entry.emojiKey] = it }
 
     private fun currentUserId(): Long = runCatching { StoreStream.getUsers().me.id }.getOrDefault(0L)
 
