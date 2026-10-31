@@ -14,6 +14,8 @@ import com.aliucord.Constants
 import com.aliucord.Utils
 import com.aliucord.api.PatcherAPI
 import com.aliucord.api.SettingsAPI
+import com.aliucord.utils.GsonUtils.fromJson
+import com.aliucord.utils.GsonUtils.toJson
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
 import com.discord.api.message.reaction.MessageReaction
@@ -27,10 +29,6 @@ import com.discord.views.ReactionView
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterEventsHandler
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemReactions
 import com.discord.widgets.chat.list.entries.ChatListEntry
-import com.google.gson.JsonArray
-import com.google.gson.JsonNull
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
 import java.io.File
 import java.text.DateFormat
 import java.util.ArrayList
@@ -297,27 +295,13 @@ internal class ReactionLogger(
 
     private fun withPlaceholders(message: Message, missing: Collection<RemovedReaction>): Message? = try {
         val gson = InboundGatewayGsonParser.INSTANCE.gatewayGsonInstance
-        val tree = JsonParser().parse(gson.toJson(message.synthesizeApiMessage())).asJsonObject
-        val existing = tree.get("reactions")
-        val array = if (existing != null && existing.isJsonArray) {
-            existing.asJsonArray
-        } else {
-            JsonArray().also { tree.add("reactions", it) }
-        }
+        val tree = JSONObject(gson.toJson(message.synthesizeApiMessage()))
+        val array = tree.optJSONArray("reactions") ?: JSONArray().also { tree.put("reactions", it) }
         missing.forEach { entry ->
-            array.add(
-                JsonObject().apply {
-                    addProperty("count", PLACEHOLDER_COUNT)
-                    addProperty("me", false)
-                    add(
-                        "emoji",
-                        JsonObject().apply {
-                            if (entry.emojiId != null) addProperty("id", entry.emojiId) else add("id", JsonNull.INSTANCE)
-                            addProperty("name", entry.emojiName)
-                        },
-                    )
-                },
-            )
+            val emoji = JSONObject()
+                .put("id", entry.emojiId ?: JSONObject.NULL)
+                .put("name", entry.emojiName ?: JSONObject.NULL)
+            array.put(JSONObject().put("count", PLACEHOLDER_COUNT).put("me", false).put("emoji", emoji))
         }
         Message(gson.fromJson(tree.toString(), ApiMessage::class.java))
     } catch (error: Throwable) {
