@@ -274,7 +274,7 @@ internal class MessageDecorations(
     fun clearActions(sheet: WidgetChatListActions) {
         try {
             val rows = actionRows(sheet) ?: return
-            listOf("History", "Delete").forEach { name ->
+            listOf("History", "Delete", "Reactions").forEach { name ->
                 rows.findViewWithTag<View>("BetterMessageLogger.$name")?.let(rows::removeView)
             }
         } catch (error: Exception) {

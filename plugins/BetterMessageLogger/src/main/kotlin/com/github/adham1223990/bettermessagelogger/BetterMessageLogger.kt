@@ -38,6 +38,7 @@ class BetterMessageLogger : Plugin() {
 
     @Volatile private var media: MessageMediaStore? = null
     private lateinit var decorations: MessageDecorations
+    private lateinit var reactions: ReactionLogger
 
     @Volatile private var running = false
 
@@ -73,6 +74,13 @@ class BetterMessageLogger : Plugin() {
                     logger.error(action, error)
                 }
             decorations.patch(patcher)
+            reactions = ReactionLogger(
+                settings,
+                { userId, channelId -> filters.keepReaction(userId, channelId, resolveGuildId(channelId, null)) },
+                { databaseEnabled },
+                ::bumpRevision,
+            ) { action, error -> logger.error("Could not $action", error) }
+            reactions.patch(patcher)
             patchMessages()
             patchDisplayModel()
             patchActions()
@@ -81,6 +89,7 @@ class BetterMessageLogger : Plugin() {
                 logger.error("Could not $action", error)
             }.patch(patcher)
             databaseEnabled = settings.getBool("database", false)
+            reactions.loadAsync()
             if (databaseEnabled ||
                 File(Constants.BASE_PATH, DB_NAME).exists() ||
                 File(Constants.BASE_PATH, "BetterMessageLogger").isDirectory
@@ -214,7 +223,7 @@ class BetterMessageLogger : Plugin() {
                         source,
                         revision,
                         Func2<MessagesWithMetadata, Long, MessagesWithMetadata> { current, _ ->
-                            val merged = withDeletedMessages(channelId, current.messages)
+                            val merged = reactions.decorate(withDeletedMessages(channelId, current.messages))
                             current.copy(
                                 merged,
                                 current.messageState,
@@ -239,6 +248,11 @@ class BetterMessageLogger : Plugin() {
                 val message = (frame.args[0] as WidgetChatListActions.Model).message
                 // Sheets are reused by Discord; remove actions belonging to the previous message.
                 decorations.clearActions(sheet)
+                if (message != null && reactions.hasRemoved(message.id)) {
+                    decorations.addAction(sheet, "Reactions", "View Removed Reactions", "ic_history_white_24dp") {
+                        reactions.showMessage(sheet.requireContext(), message.id)
+                    }
+                }
                 val saved = message?.let { record(it.id) } ?: return@Hook
                 if (saved.edits.isNotEmpty()) {
                     decorations.addAction(sheet, "History", "View Edit History", "ic_history_white_24dp") {
@@ -499,6 +513,10 @@ class BetterMessageLogger : Plugin() {
     internal fun setDatabaseEnabled(enabled: Boolean) {
         databaseEnabled = enabled
         settings.setBool("database", enabled)
+        if (enabled) {
+            reactions.loadAsync()
+            reactions.saveSoon()
+        }
         synchronized(lock) {
             state.invalidateLoads()
             if (enabled) {
@@ -536,6 +554,7 @@ class BetterMessageLogger : Plugin() {
         synchronized(lock) {
             state.invalidateLoads()
             state.records.values.toList().filterNot(::shouldKeep).forEach { removeRecord(it.id) }
+            reactions.applyFilters()
             val currentFilters = filters
             database?.let { db ->
                 db.pruneAsync { currentFilters.keep(it, resolveGuildId(it.channelId, it.guildId)) }
@@ -546,7 +565,24 @@ class BetterMessageLogger : Plugin() {
         bumpRevision()
     }
 
+    internal fun reactionCount() = if (::reactions.isInitialized) reactions.count() else 0
+
+    internal fun showReactionLog(context: Context) {
+        if (::reactions.isInitialized) reactions.showAll(context)
+    }
+
+    internal fun clearReactionLog() {
+        if (::reactions.isInitialized) reactions.clear()
+        bumpRevision()
+    }
+
+    internal fun reactionSettingsChanged() {
+        if (::reactions.isInitialized) reactions.refreshVisible()
+        bumpRevision()
+    }
+
     internal fun refreshAppearance() {
+        if (::reactions.isInitialized) reactions.refreshVisible()
         decorations.refresh(removeHistory = true)
         bumpRevision()
     }
@@ -556,6 +592,7 @@ class BetterMessageLogger : Plugin() {
             state.clear()
             liveMessages.evictAll()
             boundMessages.evictAll()
+            reactions.clear()
             media?.clearAsync()
             ensureDatabase().clearAsync { result ->
                 Utils.mainThread.post {
@@ -626,6 +663,7 @@ class BetterMessageLogger : Plugin() {
         running = false
         patcher.unpatchAll()
         if (::decorations.isInitialized) decorations.close()
+        if (::reactions.isInitialized) reactions.close()
         synchronized(lock) {
             state.clear()
             liveMessages.evictAll()
@@ -658,12 +696,19 @@ class BetterMessageLogger : Plugin() {
             if ((ignoreBots && record.bot) || record.authorId in ids.getValue("ignoredUsers")) return false
             if (ignoreOwn && record.authorId == runCatching { StoreStream.getUsers().me.id }.getOrNull()) return false
 
+            return keepContext(record.channelId, guildId)
+        }
+
+        fun keepReaction(userId: Long, channelId: Long, guildId: Long?): Boolean =
+            userId !in ids.getValue("ignoredUsers") && keepContext(channelId, guildId)
+
+        private fun keepContext(channelId: Long, guildId: Long?): Boolean {
             fun allowed(id: Long, black: String, white: String) = id !in ids.getValue(black) &&
                 (ids.getValue(white).isEmpty() || id in ids.getValue(white))
             return if (guildId == null || guildId == 0L) {
-                allowed(record.channelId, "blackDms", "whiteDms")
+                allowed(channelId, "blackDms", "whiteDms")
             } else {
-                allowed(record.channelId, "blackChannels", "whiteChannels") &&
+                allowed(channelId, "blackChannels", "whiteChannels") &&
                     allowed(guildId, "blackServers", "whiteServers")
             }
         }
@@ -684,6 +729,11 @@ class BetterMessageLogger : Plugin() {
         internal const val SHOW_DELETED_TAG = "showDeletedTag"
         internal const val DEFAULT_DELETED_LABEL_COLOR = "#FFFF0000"
         internal const val DEFAULT_DELETED_MESSAGE_COLOR = "#FFFFFFFF"
+        internal const val LOG_REACTIONS = "logReactions"
+        internal const val SHOW_REMOVED_REACTIONS = "showRemovedReactions"
+        internal const val REACTION_IGNORE_OWN = "reactionIgnoreOwn"
+        internal const val REMOVED_REACTION_COLOR = "removedReactionColor"
+        internal const val DEFAULT_REMOVED_REACTION_COLOR = "#FFFF0000"
 
         @Volatile internal var instance: BetterMessageLogger? = null
             private set

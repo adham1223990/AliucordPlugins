@@ -23,6 +23,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     private lateinit var ui: LoggerUi
     private var storageCaption: TextView? = null
     private var databaseToggle: CheckedSetting? = null
+    private var reactionCaption: TextView? = null
     private val values = HashMap<String, TextView>()
     private var dialog: DiscordDialog? = null
 
@@ -74,6 +75,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         ui.row(appearance, "Reset colors", null) {
             settings.setString(Keys.DELETED_LABEL_COLOR, Keys.DEFAULT_DELETED_LABEL_COLOR)
             settings.setString(Keys.DELETED_MESSAGE_COLOR, Keys.DEFAULT_DELETED_MESSAGE_COLOR)
+            settings.setString(Keys.REMOVED_REACTION_COLOR, Keys.DEFAULT_REMOVED_REACTION_COLOR)
             BetterMessageLogger.instance?.refreshAppearance()
             updateColors()
         }
@@ -86,6 +88,35 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         toggle(history, Keys.INLINE_EDIT_HISTORY, "Show history in chat", "Previous versions appear above messages.") {
             BetterMessageLogger.instance?.refreshAppearance()
         }
+
+        val reactions = section("Reaction logger")
+        toggle(
+            reactions,
+            Keys.LOG_REACTIONS,
+            "Log removed reactions",
+            "Remember reactions that people remove from messages.",
+            true,
+        ) {
+            BetterMessageLogger.instance?.reactionSettingsChanged()
+            updateReactionCaption()
+        }
+        toggle(
+            reactions,
+            Keys.SHOW_REMOVED_REACTIONS,
+            "Show removed reactions in chat",
+            "Removed reactions appear as a dashed, struck-through pill next to the active ones. Tap one to see who removed it.",
+            true,
+        ) { BetterMessageLogger.instance?.reactionSettingsChanged() }
+        toggle(reactions, Keys.REACTION_IGNORE_OWN, "Ignore my reactions", null, true) {}
+        values[Keys.REMOVED_REACTION_COLOR] =
+            ui.row(reactions, "Removed reaction color", colorValue(Keys.REMOVED_REACTION_COLOR)) {
+                colorDialog(Keys.REMOVED_REACTION_COLOR, "Removed reaction color")
+            }
+        ui.row(reactions, "View reaction log", null, "ic_history_white_24dp") {
+            BetterMessageLogger.instance?.showReactionLog(requireContext())
+        }
+        ui.row(reactions, "Clear reaction log", null, "ic_delete_24dp", ui.danger) { confirmClearReactions() }
+        reactionCaption = ui.caption("").also(reactions::addView)
 
         val filters = section("Filters")
         toggle(filters, "ignoreOwn", "Ignore my messages", null) { filtersChanged() }
@@ -106,6 +137,26 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         )
         updateColors()
         updateStorage()
+        updateReactionCaption()
+    }
+
+    private fun updateReactionCaption() {
+        val n = BetterMessageLogger.instance?.reactionCount() ?: 0
+        val saved = if (settings.getBool("database", false)) "" else " · cleared on restart"
+        reactionCaption?.text = "$n removed reaction${if (n == 1) "" else "s"} logged$saved"
+    }
+
+    private fun confirmClearReactions() {
+        showDialog(
+            DiscordDialog(requireContext(), "Clear reaction log?", destructive = true)
+                .message("All logged removed reactions will be deleted.")
+                .negative("Cancel")
+                .positive("Clear") {
+                    BetterMessageLogger.instance?.clearReactionLog()
+                    updateReactionCaption()
+                    true
+                },
+        )
     }
 
     private fun section(title: String, first: Boolean = false): LinearLayout {
@@ -241,13 +292,16 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
     }
 
     private fun colorValue(key: String): String {
-        val fallback =
-            if (key == Keys.DELETED_LABEL_COLOR) Keys.DEFAULT_DELETED_LABEL_COLOR else Keys.DEFAULT_DELETED_MESSAGE_COLOR
+        val fallback = when (key) {
+            Keys.DELETED_LABEL_COLOR -> Keys.DEFAULT_DELETED_LABEL_COLOR
+            Keys.REMOVED_REACTION_COLOR -> Keys.DEFAULT_REMOVED_REACTION_COLOR
+            else -> Keys.DEFAULT_DELETED_MESSAGE_COLOR
+        }
         return parseColor(settings.getString(key, fallback))?.let(::hex) ?: fallback
     }
 
     private fun updateColors() {
-        listOf(Keys.DELETED_LABEL_COLOR, Keys.DELETED_MESSAGE_COLOR).forEach { key ->
+        listOf(Keys.DELETED_LABEL_COLOR, Keys.DELETED_MESSAGE_COLOR, Keys.REMOVED_REACTION_COLOR).forEach { key ->
             values[key]?.apply {
                 text = colorValue(key)
                 val swatch = android.graphics.drawable.GradientDrawable().apply {
@@ -345,6 +399,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
                 IdLists.ALLOWED_DMS,
             ).forEach { key -> values[key]?.text = count(key) }
             updateColors()
+            updateReactionCaption()
         }
     }
 
@@ -353,6 +408,7 @@ class BetterMessageLoggerSettings(private val settings: SettingsAPI) : SettingsP
         dialog = null
         storageCaption = null
         databaseToggle = null
+        reactionCaption = null
         values.clear()
         super.onDestroyView()
     }
